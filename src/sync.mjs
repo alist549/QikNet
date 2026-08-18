@@ -249,6 +249,10 @@ async function readQikNetInventory(page) {
     }
   }
 
+  if (!records.length) {
+    throw new Error(`No QikNet inventory cards were parsed. Visible inventory: ${sanitizePageText(pageSummary).slice(0, 1_500)}`);
+  }
+
   return records;
 }
 
