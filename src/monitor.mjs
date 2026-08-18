@@ -38,7 +38,12 @@ const report = {
 
 const browser = await chromium.launch({
   headless,
-  args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  args: [
+    "--disable-backgrounding-occluded-windows",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+  ],
 });
 const context = await browser.newContext({ timezoneId: "Africa/Harare", locale: "en-ZW" });
 context.setDefaultTimeout(actionTimeout);

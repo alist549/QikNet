@@ -45,7 +45,12 @@ await mkdir(REPORT_DIR, { recursive: true });
 
 const browser = await chromium.launch({
   headless,
-  args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  args: [
+    "--disable-backgrounding-occluded-windows",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+  ],
 });
 
 const context = await browser.newContext({

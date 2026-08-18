@@ -52,7 +52,7 @@ jobs:
 
       - name: Persist alert state
         if: always()
-        shell: pwsh
+        shell: powershell
         run: |
           git config user.name "qiknet-monitor[bot]"
           git config user.email "qiknet-monitor[bot]@users.noreply.github.com"
