@@ -486,7 +486,7 @@ async function waitForStationOrLoginError(page, stationMarker) {
 
 async function waitForQikNetDashboardOrLoginError(page) {
   const dashboard = page.getByText("QikNet Control Center", { exact: true });
-  const feedback = page.locator('[role="alert"], .alert, .error, [class*="error"], [class*="invalid"]');
+  const feedback = page.locator('[role="alert"], .alert');
   const deadline = Date.now() + navigationTimeout;
   while (Date.now() < deadline) {
     if (/\/super(?:#|$)/.test(page.url()) && await dashboard.isVisible().catch(() => false)) return;
