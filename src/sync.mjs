@@ -60,8 +60,6 @@ const browser = await chromium.launch({
   args: browserArgs,
 });
 
-const ruijieBrowser = await chromium.launch({ headless, args: browserArgs });
-
 const context = await browser.newContext({
   acceptDownloads: true,
   timezoneId: "Africa/Harare",
@@ -70,16 +68,8 @@ const context = await browser.newContext({
 context.setDefaultTimeout(actionTimeout);
 context.setDefaultNavigationTimeout(navigationTimeout);
 
-const ruijieContext = await ruijieBrowser.newContext({
-  acceptDownloads: true,
-  timezoneId: "Africa/Harare",
-  locale: "en-ZW",
-});
-ruijieContext.setDefaultTimeout(actionTimeout);
-ruijieContext.setDefaultNavigationTimeout(navigationTimeout);
-
-const qiknetPage = await context.newPage();
-const ruijiePage = await ruijieContext.newPage();
+let qiknetPage = await context.newPage();
+let ruijiePage = null;
 
 try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
@@ -94,6 +84,9 @@ try {
   if (work.length === 0) {
     report.status = "healthy";
   } else {
+    await qiknetPage.close();
+    qiknetPage = null;
+    ruijiePage = await context.newPage();
     await loginRuijie(ruijiePage);
 
     if (dryRun) {
@@ -109,14 +102,33 @@ try {
       }
       report.status = report.errors.length ? "completed-with-errors" : "dry-run-complete";
     } else {
+      const exported = [];
       for (const item of work) {
         try {
           const action = await prepareRuijieExport(ruijiePage, item);
+          action.status = "exported";
+          report.actions.push(action);
+          exported.push({ item, action });
+        } catch (error) {
+          recordItemError(item, error);
+        }
+      }
+
+      await ruijiePage.close();
+      ruijiePage = null;
+
+      if (exported.length) {
+        qiknetPage = await context.newPage();
+        await loginQikNet(qiknetPage);
+      }
+
+      for (const { item, action } of exported) {
+        try {
           await uploadQikNetInventory(qiknetPage, item, action.filePath);
           action.status = "uploaded";
-          report.actions.push(action);
           log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
         } catch (error) {
+          action.status = "upload-failed";
           recordItemError(item, error);
         }
       }
@@ -159,7 +171,7 @@ try {
 
   const reportPath = path.join(REPORT_DIR, `sync-${safeTimestamp(report.startedAt)}.json`);
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  await Promise.allSettled([browser.close(), ruijieBrowser.close()]);
+  await browser.close();
   log(`Report written to ${reportPath}`);
 
   if (report.errors.length) process.exitCode = 1;
