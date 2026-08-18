@@ -1,0 +1,72 @@
+name: QikNet station monitor
+
+on:
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_dispatch:
+    inputs:
+      send_sms:
+        description: "Send outage SMS alerts during this manual run"
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: write
+
+concurrency:
+  group: qiknet-automation
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      RUIJIE_EMAIL: ${{ secrets.RUIJIE_EMAIL }}
+      RUIJIE_PASSWORD: ${{ secrets.RUIJIE_PASSWORD }}
+      SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
+      DEFAULT_OUTAGE_RECIPIENTS: ${{ secrets.DEFAULT_OUTAGE_RECIPIENTS }}
+      SPECIAL_OUTAGE_RECIPIENT: ${{ secrets.SPECIAL_OUTAGE_RECIPIENT }}
+      SEND_SMS: ${{ github.event_name == 'schedule' && 'true' || toJSON(inputs.send_sms) }}
+      HEADLESS: "true"
+
+    steps:
+      - name: Check out automation and alert state
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Check station status
+        run: npm run monitor
+
+      - name: Persist alert state
+        if: always()
+        run: |
+          git config user.name "qiknet-monitor[bot]"
+          git config user.email "qiknet-monitor[bot]@users.noreply.github.com"
+          git add state/station-status.json
+          if git diff --cached --quiet; then
+            echo "No station-state change."
+          else
+            git commit -m "Update station alert state"
+            git push
+          fi
+
+      - name: Upload monitor report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qiknet-station-monitor-${{ github.run_number }}
+          path: reports/monitor/
+          if-no-files-found: warn
+          retention-days: 30
