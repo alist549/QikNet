@@ -108,27 +108,33 @@ try {
 async function loginRuijie(page) {
   console.log("Opening the Ruijie Cloud projects page...");
   await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
-  const accept = page.getByRole("button", { name: "Accept", exact: true });
-  if (await accept.isVisible().catch(() => false)) await accept.click();
-
   const email = page.getByPlaceholder("Email Address (Account)");
-  if (await email.isVisible().catch(() => false)) {
+  const stationRow = page.getByRole("row").filter({ hasText: "QikNet HotSpot" }).first();
+
+  let initialState;
+  try {
+    initialState = await Promise.any([
+      email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
+      stationRow.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+    ]);
+  } catch {
+    throw new Error("Neither the Ruijie sign-in form nor the QikNet station overview became visible.");
+  }
+
+  const accept = page.getByRole("button", { name: "Accept", exact: true });
+  if (initialState === "login") {
     console.log("Ruijie sign-in form found; signing in...");
+    if (await accept.isVisible().catch(() => false)) await accept.click();
     await email.fill(ruijieEmail);
     await page.getByPlaceholder("Password").fill(ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
+    await stationRow.waitFor({ state: "visible", timeout: navigationTimeout });
   } else {
-    console.log("Ruijie sign-in form not shown; checking the existing page session...");
+    console.log("Ruijie already has an authenticated station overview.");
   }
 
-  await page.waitForURL(/adminIntl\/#\/monitor_overview_global_menu/, { timeout: navigationTimeout });
   const close = page.getByRole("button", { name: "Close", exact: true });
   if (await close.isVisible().catch(() => false)) await close.click();
-  await page
-    .getByRole("row")
-    .filter({ hasText: "QikNet HotSpot" })
-    .first()
-    .waitFor({ state: "visible", timeout: navigationTimeout });
   console.log("Ruijie QikNet station rows are ready.");
 }
 
