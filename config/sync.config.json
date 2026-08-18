@@ -1,0 +1,80 @@
+{
+  "qiknet": {
+    "loginUrl": "https://qiknet-wifi.web.app/login",
+    "inventoryUrl": "https://qiknet-wifi.web.app/super#inventory"
+  },
+  "ruijie": {
+    "projectsUrl": "https://cloud-eu.ruijienetworks.com/macc5/adminIntl/#/monitor_overview_global_menu"
+  },
+  "stockPolicy": {
+    "minimum": 100,
+    "target": 500
+  },
+  "sms": {
+    "campaignUrl": "https://smspop.co.zw/api/campaigns",
+    "senderId": "QikNet",
+    "specialBranches": [
+      "Unit M",
+      "Unit N",
+      "Unit O"
+    ]
+  },
+  "voucherGroups": {
+    "2 Hours Voucher": "QikNet2hrsVoucher",
+    "Daily Voucher": "QikNetDailyVoucher",
+    "2 Days Voucher": "QikNetBiDailyVoucher",
+    "Weekly Voucher": "QikNetWeeklyVoucher",
+    "Monthly Voucher": "QikNetMonthlyVoucher"
+  },
+  "branches": [
+    {
+      "qiknetName": "Chikwana",
+      "stationCode": "STN_3",
+      "ruijieProject": "QikNet HotSpot 3: Chikwanha",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Makoni",
+      "stationCode": "STN_05",
+      "ruijieProject": "QikNet HotSpot 5: Makoni",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Unit C",
+      "stationCode": "STN_04",
+      "ruijieProject": "QikNet HotSpot 4: Unit C",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Unit L",
+      "stationCode": "STN1",
+      "ruijieProject": "QikNet HotSpot 1: Unit L",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Unit M",
+      "stationCode": "STN_2",
+      "ruijieProject": "QikNet HotSpot 2: Jambanja",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Unit N",
+      "stationCode": "STN_08",
+      "ruijieProject": "QikNet HotSpot 7: Unit N",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Unit O",
+      "stationCode": "STN_07",
+      "ruijieProject": "QikNet HotSpot 6: Unit O",
+      "enabled": true
+    },
+    {
+      "qiknetName": "Zengeza 4",
+      "stationCode": "STN_06",
+      "ruijieProject": "",
+      "enabled": false,
+      "note": "Station was removed and is intentionally excluded from automation."
+    }
+  ]
+}
