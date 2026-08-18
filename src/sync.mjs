@@ -84,39 +84,38 @@ try {
   } else {
     await loginRuijie(ruijiePage);
 
-    for (const item of work) {
-      try {
-        const action = await prepareRuijieExport(ruijiePage, item);
-
-        if (dryRun) {
+    if (dryRun) {
+      for (const item of work) {
+        try {
+          const action = await prepareRuijieExport(ruijiePage, item);
           action.status = "dry-run";
           report.actions.push(action);
           log(`[DRY RUN] ${item.branch.qiknetName} / ${item.qiknetGroup}: ${action.sourceCount} unused source voucher(s).`);
-          continue;
+        } catch (error) {
+          recordItemError(item, error);
         }
-
-        await uploadQikNetInventory(qiknetPage, item, action.filePath);
-        action.status = "uploaded";
-        report.actions.push(action);
-        log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
-      } catch (error) {
-        const message = formatError(error);
-        report.errors.push({
-          branch: item.branch.qiknetName,
-          voucherGroup: item.qiknetGroup,
-          message,
-        });
-        log(`ERROR ${item.branch.qiknetName} / ${item.qiknetGroup}: ${message}`);
       }
-    }
+      report.status = report.errors.length ? "completed-with-errors" : "dry-run-complete";
+    } else {
+      for (const item of work) {
+        try {
+          const action = await prepareRuijieExport(ruijiePage, item);
+          await uploadQikNetInventory(qiknetPage, item, action.filePath);
+          action.status = "uploaded";
+          report.actions.push(action);
+          log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
+        } catch (error) {
+          recordItemError(item, error);
+        }
+      }
 
-    if (!dryRun && report.actions.some((action) => action.status === "uploaded")) {
-      await qiknetPage.waitForTimeout(1_000);
-      report.inventoryAfter = await readQikNetInventory(qiknetPage);
-      verifyReplenishmentTargets(report.inventoryAfter);
+      if (report.actions.some((action) => action.status === "uploaded")) {
+        await qiknetPage.waitForTimeout(1_000);
+        report.inventoryAfter = await readQikNetInventory(qiknetPage);
+        verifyReplenishmentTargets(report.inventoryAfter);
+      }
+      report.status = report.errors.length ? "completed-with-errors" : "updated";
     }
-
-    report.status = report.errors.length ? "completed-with-errors" : dryRun ? "dry-run-complete" : "updated";
   }
 } catch (error) {
   report.status = "failed";
@@ -453,6 +452,16 @@ function safeTimestamp(value) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function recordItemError(item, error) {
+  const message = formatError(error);
+  report.errors.push({
+    branch: item.branch.qiknetName,
+    voucherGroup: item.qiknetGroup,
+    message,
+  });
+  log(`ERROR ${item.branch.qiknetName} / ${item.qiknetGroup}: ${message}`);
 }
 
 async function waitForStationOrLoginError(page, stationMarker) {
