@@ -17,11 +17,6 @@ if (Test-Path (Join-Path $runnerRoot ".runner")) {
     throw "A GitHub runner is already configured at $runnerRoot. Remove it through GitHub before rerunning this script."
 }
 
-$registrationToken = Read-Host "Paste the one-hour GitHub runner registration token"
-if ([string]::IsNullOrWhiteSpace($registrationToken)) {
-    throw "A registration token is required."
-}
-
 New-Item -ItemType Directory -Path $runnerRoot -Force | Out-Null
 Write-Output "Downloading the official GitHub Actions runner..."
 Invoke-WebRequest -UseBasicParsing -Uri $runnerUrl -OutFile $runnerZip
@@ -33,6 +28,11 @@ if ($actualSha256 -ne $runnerSha256) {
 
 Expand-Archive -LiteralPath $runnerZip -DestinationPath $runnerRoot -Force
 Remove-Item -LiteralPath $runnerZip -Force
+
+$registrationToken = Read-Host "Paste a fresh one-hour GitHub runner registration token"
+if ([string]::IsNullOrWhiteSpace($registrationToken)) {
+    throw "A registration token is required."
+}
 
 Push-Location $runnerRoot
 try {
