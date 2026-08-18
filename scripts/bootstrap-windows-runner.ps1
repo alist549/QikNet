@@ -10,6 +10,9 @@ $runnerRoot = Join-Path $env:USERPROFILE "qiknet-actions-runner"
 $runnerZip = Join-Path $env:TEMP "actions-runner-win-x64-$runnerVersion.zip"
 $runnerUrl = "https://github.com/actions/runner/releases/download/v$runnerVersion/actions-runner-win-x64-$runnerVersion.zip"
 
+# Windows Server 2016 PowerShell may otherwise negotiate obsolete TLS versions.
+[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+
 if (Test-Path (Join-Path $runnerRoot ".runner")) {
     throw "A GitHub runner is already configured at $runnerRoot. Remove it through GitHub before rerunning this script."
 }
