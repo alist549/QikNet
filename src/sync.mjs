@@ -316,7 +316,8 @@ async function prepareRuijieExport(page, item) {
     throw new Error(`Expected one Ruijie project named '${item.branch.ruijieProject}', found ${await projectRow.count()}.`);
   }
 
-  await projectRow.getByRole("img", { name: "Go to this project" }).click();
+  await dismissRuijieReleaseOverlay(page);
+  await projectRow.getByRole("img", { name: "Go to this project" }).click({ force: true });
   await page.waitForURL(/#\/monitor_project_workbarn_menu/, { timeout: navigationTimeout });
 
   await page.getByText("Auth & Accounts", { exact: true }).click();
@@ -528,6 +529,19 @@ async function openRuijieProjects(page, email, stationMarker) {
   }
 
   throw new Error(`Neither the Ruijie sign-in form nor station overview became visible after 3 attempts: ${formatError(lastError)}`);
+}
+
+async function dismissRuijieReleaseOverlay(page) {
+  const overlay = page.locator(".version-wrapper");
+  if (!await overlay.isVisible().catch(() => false)) return;
+
+  const closeControl = overlay.locator('[aria-label="close"], .anticon-close, button').first();
+  if (await closeControl.isVisible().catch(() => false)) {
+    await closeControl.click({ force: true }).catch(() => {});
+  } else {
+    await page.keyboard.press("Escape").catch(() => {});
+  }
+  await overlay.waitFor({ state: "hidden", timeout: 3_000 }).catch(() => {});
 }
 
 async function waitForStationOrLoginError(page, stationMarker) {
