@@ -109,13 +109,13 @@ async function loginRuijie(page) {
   console.log("Opening the Ruijie Cloud projects page...");
   await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
   const email = page.getByPlaceholder("Email Address (Account)");
-  const stationRow = page.getByRole("row").filter({ hasText: "QikNet HotSpot" }).first();
+  const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
 
   let initialState;
   try {
     initialState = await Promise.any([
       email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
-      stationRow.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+      stationMarker.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
     ]);
   } catch {
     throw new Error("Neither the Ruijie sign-in form nor the QikNet station overview became visible.");
@@ -128,7 +128,11 @@ async function loginRuijie(page) {
     await email.fill(ruijieEmail);
     await page.getByPlaceholder("Password").fill(ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
-    await stationRow.waitFor({ state: "visible", timeout: navigationTimeout });
+    try {
+      await stationMarker.waitFor({ state: "visible", timeout: navigationTimeout });
+    } catch {
+      throw new Error(await describeRuijiePage(page));
+    }
   } else {
     console.log("Ruijie already has an authenticated station overview.");
   }
@@ -237,6 +241,19 @@ function safeTimestamp(value) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function describeRuijiePage(page) {
+  const currentUrl = new URL(page.url());
+  const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const summary = bodyText
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email hidden]")
+    .replace(/\b\d{8,}\b/g, "[number hidden]")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 700);
+  return `Ruijie station names did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`;
 }
 
 function escapeWorkflowCommand(value) {
