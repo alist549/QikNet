@@ -155,7 +155,18 @@ async function loginQikNet(page) {
   await page.goto(config.qiknet.loginUrl, { waitUntil: "domcontentloaded" });
 
   const email = page.getByLabel("Email", { exact: true });
-  if (await email.isVisible().catch(() => false)) {
+  const dashboard = page.getByText("QikNet Control Center", { exact: true });
+  let initialState;
+  try {
+    initialState = await Promise.any([
+      email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
+      dashboard.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+    ]);
+  } catch {
+    throw new Error("Neither the QikNet sign-in form nor dashboard became visible.");
+  }
+
+  if (initialState === "login") {
     await enterCredentialsHumanly(
       page,
       email,
