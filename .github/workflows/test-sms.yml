@@ -1,0 +1,35 @@
+name: Test QikNet SMS notifications
+
+on:
+  workflow_dispatch:
+    inputs:
+      message:
+        description: "Optional test message; leave blank for the standard QikNet test"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  test-sms:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
+      STOCK_REPORT_RECIPIENT: ${{ secrets.STOCK_REPORT_RECIPIENT }}
+      DEFAULT_OUTAGE_RECIPIENTS: ${{ secrets.DEFAULT_OUTAGE_RECIPIENTS }}
+      SPECIAL_OUTAGE_RECIPIENT: ${{ secrets.SPECIAL_OUTAGE_RECIPIENT }}
+      TEST_SMS_MESSAGE: ${{ inputs.message }}
+
+    steps:
+      - name: Check out automation
+        uses: actions/checkout@v4
+
+      - name: Use Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+
+      - name: Send one test SMS to every configured number
+        run: npm run test:sms
