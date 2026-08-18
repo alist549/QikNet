@@ -37,7 +37,7 @@ const report = {
   inventory: [],
   inventoryAfter: [],
   actions: [],
-  sms: null,
+  sms: [],
   errors: [],
 };
 
@@ -126,19 +126,22 @@ try {
   report.completedAt = new Date().toISOString();
 
   if (!dryRun) {
-    try {
-      await sendSmsCampaign({
-        token: process.env.SMSPOP_TOKEN,
-        campaignUrl: config.sms.campaignUrl,
-        senderId: config.sms.senderId,
-        recipient: requiredEnv("STOCK_REPORT_RECIPIENT"),
-        campaignName: "QikNet Daily Voucher Stock Report",
-        message: buildStockReportMessage(),
-      });
-      report.sms = { recipient: maskPhone(requiredEnv("STOCK_REPORT_RECIPIENT")), status: "sent" };
-    } catch (error) {
-      report.sms = { recipient: "configured stock-report recipient", status: "failed", message: formatError(error) };
-      report.errors.push({ message: `Stock report SMS failed: ${formatError(error)}` });
+    const stockRecipients = splitRecipients(requiredEnv("STOCK_REPORT_RECIPIENT"));
+    for (const recipient of stockRecipients) {
+      try {
+        await sendSmsCampaign({
+          token: process.env.SMSPOP_TOKEN,
+          campaignUrl: config.sms.campaignUrl,
+          senderId: config.sms.senderId,
+          recipient,
+          campaignName: "QikNet Daily Voucher Stock Report",
+          message: buildStockReportMessage(),
+        });
+        report.sms.push({ recipient: maskPhone(recipient), status: "sent" });
+      } catch (error) {
+        report.sms.push({ recipient: maskPhone(recipient), status: "failed", message: formatError(error) });
+        report.errors.push({ message: `Stock report SMS failed for ${maskPhone(recipient)}: ${formatError(error)}` });
+      }
     }
   }
 
@@ -183,19 +186,9 @@ async function loginQikNet(page) {
 
 async function loginRuijie(page) {
   log("Signing in to Ruijie Cloud.");
-  await page.goto(config.ruijie.projectsUrl, { waitUntil: "commit" });
   const email = page.getByPlaceholder("Email Address (Account)");
   const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
-
-  let initialState;
-  try {
-    initialState = await Promise.any([
-      email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
-      stationMarker.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
-    ]);
-  } catch {
-    throw new Error("Neither the Ruijie sign-in form nor the QikNet station overview became visible.");
-  }
+  const initialState = await openRuijieProjects(page, email, stationMarker);
 
   if (initialState === "login") {
     const cookieAccept = page.getByRole("button", { name: "Accept", exact: true });
@@ -289,8 +282,10 @@ function buildWorkList(inventory) {
 
 async function prepareRuijieExport(page, item) {
   log(`Reading Ruijie stock for ${item.branch.ruijieProject} / ${item.ruijieGroup}.`);
-  await page.goto(config.ruijie.projectsUrl, { waitUntil: "commit" });
-  await page.getByText("QikNet HotSpot", { exact: false }).first().waitFor({ state: "visible" });
+  const email = page.getByPlaceholder("Email Address (Account)");
+  const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
+  const state = await openRuijieProjects(page, email, stationMarker);
+  if (state !== "ready") throw new Error("Ruijie returned to the sign-in page during voucher export.");
 
   const projectRow = page.getByRole("row").filter({ hasText: item.branch.ruijieProject });
   if ((await projectRow.count()) !== 1) {
@@ -476,6 +471,10 @@ function formatError(error) {
   return error instanceof Error ? error.message : String(error);
 }
 
+function splitRecipients(value) {
+  return [...new Set(String(value).split(",").map((recipient) => recipient.trim()).filter(Boolean))];
+}
+
 function recordItemError(item, error) {
   const message = formatError(error);
   report.errors.push({
@@ -484,6 +483,27 @@ function recordItemError(item, error) {
     message,
   });
   log(`ERROR ${item.branch.qiknetName} / ${item.qiknetGroup}: ${message}`);
+}
+
+async function openRuijieProjects(page, email, stationMarker) {
+  await page.bringToFront();
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.goto(config.ruijie.projectsUrl, { waitUntil: "commit", timeout: navigationTimeout });
+      return await Promise.any([
+        email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
+        stationMarker.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+      ]);
+    } catch (error) {
+      lastError = error;
+      log(`Ruijie projects page was not ready (attempt ${attempt}/3).`);
+      if (attempt < 3) await page.waitForTimeout(attempt * 2_000);
+    }
+  }
+
+  throw new Error(`Neither the Ruijie sign-in form nor station overview became visible after 3 attempts: ${formatError(lastError)}`);
 }
 
 async function waitForStationOrLoginError(page, stationMarker) {

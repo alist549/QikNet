@@ -15,6 +15,11 @@ on:
         description: "Optional comma-separated QikNet branch names"
         required: false
         type: string
+      confirm_live_upload:
+        description: "I approve uploading exported vouchers to QikNet"
+        required: true
+        default: false
+        type: boolean
 
 permissions:
   contents: read
@@ -35,8 +40,8 @@ jobs:
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
       STOCK_REPORT_RECIPIENT: ${{ secrets.STOCK_REPORT_RECIPIENT }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.dry_run) || vars.QIKNET_DRY_RUN }}
-      # Independent kill switch. Change only after an approved live activation.
-      ALLOW_QIKNET_UPLOAD: "false"
+      # Live writes require both dry_run=false and an explicit manual confirmation.
+      ALLOW_QIKNET_UPLOAD: ${{ github.event_name == 'workflow_dispatch' && !inputs.dry_run && inputs.confirm_live_upload && 'true' || 'false' }}
       SYNC_BRANCHES: ${{ github.event_name == 'workflow_dispatch' && inputs.branches || '' }}
       HEADLESS: "false"
 
