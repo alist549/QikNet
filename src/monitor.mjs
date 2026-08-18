@@ -125,8 +125,7 @@ async function loginRuijie(page) {
   if (initialState === "login") {
     console.log("Ruijie sign-in form found; signing in...");
     if (await accept.isVisible().catch(() => false)) await accept.click();
-    await email.fill(ruijieEmail);
-    await page.getByPlaceholder("Password").fill(ruijiePassword);
+    await enterCredentialsHumanly(page, email, page.getByPlaceholder("Password"), ruijieEmail, ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
     await waitForStationOrLoginError(page, stationMarker);
   } else {
@@ -271,4 +270,18 @@ function sanitizeRuijieText(value) {
 
 function escapeWorkflowCommand(value) {
   return String(value).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue) {
+  await page.waitForTimeout(randomInteger(700, 1_300));
+  await emailField.click();
+  await emailField.pressSequentially(emailValue, { delay: randomInteger(65, 105) });
+  await page.waitForTimeout(randomInteger(450, 900));
+  await passwordField.click();
+  await passwordField.pressSequentially(passwordValue, { delay: randomInteger(70, 115) });
+  await page.waitForTimeout(randomInteger(700, 1_300));
+}
+
+function randomInteger(minimum, maximum) {
+  return Math.floor(Math.random() * (maximum - minimum + 1)) + minimum;
 }
