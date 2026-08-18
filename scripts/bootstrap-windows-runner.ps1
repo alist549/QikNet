@@ -17,6 +17,11 @@ if (Test-Path (Join-Path $runnerRoot ".runner")) {
     throw "A GitHub runner is already configured at $runnerRoot. Remove it through GitHub before rerunning this script."
 }
 
+if (Test-Path -LiteralPath $runnerRoot) {
+    Write-Output "Removing an incomplete previous runner extraction..."
+    Remove-Item -LiteralPath $runnerRoot -Recurse -Force
+}
+
 New-Item -ItemType Directory -Path $runnerRoot -Force | Out-Null
 Write-Output "Downloading the official GitHub Actions runner..."
 Invoke-WebRequest -UseBasicParsing -Uri $runnerUrl -OutFile $runnerZip
