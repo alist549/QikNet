@@ -122,10 +122,14 @@ async function loginRuijie(page) {
   }
 
   await page.waitForURL(/adminIntl\/#\/monitor_overview_global_menu/, { timeout: navigationTimeout });
-  await page.getByText("Projects", { exact: true }).waitFor({ state: "visible" });
-  console.log("Ruijie projects overview is ready.");
   const close = page.getByRole("button", { name: "Close", exact: true });
   if (await close.isVisible().catch(() => false)) await close.click();
+  await page
+    .getByRole("row")
+    .filter({ hasText: "QikNet HotSpot" })
+    .first()
+    .waitFor({ state: "visible", timeout: navigationTimeout });
+  console.log("Ruijie QikNet station rows are ready.");
 }
 
 async function readStationStatuses(page) {
