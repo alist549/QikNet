@@ -35,6 +35,8 @@ jobs:
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
       STOCK_REPORT_RECIPIENT: ${{ secrets.STOCK_REPORT_RECIPIENT }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.dry_run) || vars.QIKNET_DRY_RUN }}
+      # Independent kill switch. Change only after an approved live activation.
+      ALLOW_QIKNET_UPLOAD: "false"
       SYNC_BRANCHES: ${{ github.event_name == 'workflow_dispatch' && inputs.branches || '' }}
       HEADLESS: "false"
 

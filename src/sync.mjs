@@ -11,6 +11,7 @@ const REPORT_DIR = path.join(ROOT, "reports");
 
 const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 const dryRun = parseBoolean(process.env.DRY_RUN, true);
+const allowQikNetUpload = parseBoolean(process.env.ALLOW_QIKNET_UPLOAD, false);
 const headless = parseBoolean(process.env.HEADLESS, true);
 const actionTimeout = parsePositiveInteger(process.env.ACTION_TIMEOUT_MS, 20_000);
 const navigationTimeout = parsePositiveInteger(process.env.NAVIGATION_TIMEOUT_MS, 45_000);
@@ -39,6 +40,10 @@ const report = {
   sms: null,
   errors: [],
 };
+
+if (!dryRun && !allowQikNetUpload) {
+  throw new Error("Live QikNet upload is locked. Set both DRY_RUN=false and ALLOW_QIKNET_UPLOAD=true to enable it.");
+}
 
 await mkdir(DOWNLOAD_DIR, { recursive: true });
 await mkdir(REPORT_DIR, { recursive: true });
