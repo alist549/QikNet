@@ -482,12 +482,17 @@ function sanitizeRuijieText(value) {
 
 async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue) {
   await page.waitForTimeout(randomInteger(700, 1_300));
+  await emailField.fill("");
   await emailField.click();
-  await emailField.pressSequentially(emailValue, { delay: randomInteger(65, 105) });
+  log("Entering the Ruijie account at human pace.");
+  await page.keyboard.type(emailValue, { delay: randomInteger(65, 105) });
   await page.waitForTimeout(randomInteger(450, 900));
+  await passwordField.fill("");
   await passwordField.click();
-  await passwordField.pressSequentially(passwordValue, { delay: randomInteger(70, 115) });
+  log("Entering the Ruijie password at human pace.");
+  await page.keyboard.type(passwordValue, { delay: randomInteger(70, 115) });
   await page.waitForTimeout(randomInteger(700, 1_300));
+  log("Ruijie credentials entered; submitting the form.");
 }
 
 function randomInteger(minimum, maximum) {

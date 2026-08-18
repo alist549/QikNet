@@ -12,7 +12,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: qiknet-automation
@@ -31,6 +31,7 @@ jobs:
       # Keep scheduled alerts disabled until recipient routing is validated.
       SEND_SMS: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.send_sms) || 'false' }}
       HEADLESS: "false"
+      STATION_STATE_PATH: ${{ runner.tool_cache }}\qiknet\station-status.json
 
     steps:
       - name: Check out automation and alert state
@@ -49,21 +50,6 @@ jobs:
 
       - name: Check station status
         run: npm run monitor
-
-      - name: Persist alert state
-        if: always()
-        shell: powershell
-        run: |
-          git config user.name "qiknet-monitor[bot]"
-          git config user.email "qiknet-monitor[bot]@users.noreply.github.com"
-          git add state/station-status.json
-          git diff --cached --quiet
-          if ($LASTEXITCODE -ne 0) {
-            git commit -m "Update station alert state"
-            git push
-          } else {
-            Write-Output "No station-state change."
-          }
 
       - name: Upload monitor report
         if: always()

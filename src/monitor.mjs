@@ -6,7 +6,9 @@ import { maskPhone, sendSmsCampaign } from "./sms.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const CONFIG_PATH = path.join(ROOT, "config", "sync.config.json");
-const STATE_PATH = path.join(ROOT, "state", "station-status.json");
+const STATE_PATH = process.env.STATION_STATE_PATH
+  ? path.resolve(process.env.STATION_STATE_PATH)
+  : path.join(ROOT, "state", "station-status.json");
 const REPORT_DIR = path.join(ROOT, "reports", "monitor");
 const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 
@@ -279,12 +281,17 @@ function escapeWorkflowCommand(value) {
 
 async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue) {
   await page.waitForTimeout(randomInteger(700, 1_300));
+  await emailField.fill("");
   await emailField.click();
-  await emailField.pressSequentially(emailValue, { delay: randomInteger(65, 105) });
+  console.log("Entering the Ruijie account at human pace...");
+  await page.keyboard.type(emailValue, { delay: randomInteger(65, 105) });
   await page.waitForTimeout(randomInteger(450, 900));
+  await passwordField.fill("");
   await passwordField.click();
-  await passwordField.pressSequentially(passwordValue, { delay: randomInteger(70, 115) });
+  console.log("Entering the Ruijie password at human pace...");
+  await page.keyboard.type(passwordValue, { delay: randomInteger(70, 115) });
   await page.waitForTimeout(randomInteger(700, 1_300));
+  console.log("Ruijie credentials entered; submitting the form.");
 }
 
 function randomInteger(minimum, maximum) {
