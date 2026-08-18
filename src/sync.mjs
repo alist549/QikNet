@@ -48,15 +48,19 @@ if (!dryRun && !allowQikNetUpload) {
 await mkdir(DOWNLOAD_DIR, { recursive: true });
 await mkdir(REPORT_DIR, { recursive: true });
 
+const browserArgs = [
+  "--disable-backgrounding-occluded-windows",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-sandbox",
+];
+
 const browser = await chromium.launch({
   headless,
-  args: [
-    "--disable-backgrounding-occluded-windows",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--no-sandbox",
-  ],
+  args: browserArgs,
 });
+
+const ruijieBrowser = await chromium.launch({ headless, args: browserArgs });
 
 const context = await browser.newContext({
   acceptDownloads: true,
@@ -66,8 +70,16 @@ const context = await browser.newContext({
 context.setDefaultTimeout(actionTimeout);
 context.setDefaultNavigationTimeout(navigationTimeout);
 
+const ruijieContext = await ruijieBrowser.newContext({
+  acceptDownloads: true,
+  timezoneId: "Africa/Harare",
+  locale: "en-ZW",
+});
+ruijieContext.setDefaultTimeout(actionTimeout);
+ruijieContext.setDefaultNavigationTimeout(navigationTimeout);
+
 const qiknetPage = await context.newPage();
-const ruijiePage = await context.newPage();
+const ruijiePage = await ruijieContext.newPage();
 
 try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
@@ -147,7 +159,7 @@ try {
 
   const reportPath = path.join(REPORT_DIR, `sync-${safeTimestamp(report.startedAt)}.json`);
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  await browser.close();
+  await Promise.allSettled([browser.close(), ruijieBrowser.close()]);
   log(`Report written to ${reportPath}`);
 
   if (report.errors.length) process.exitCode = 1;
