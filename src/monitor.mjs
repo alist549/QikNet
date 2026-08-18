@@ -128,11 +128,7 @@ async function loginRuijie(page) {
     await email.fill(ruijieEmail);
     await page.getByPlaceholder("Password").fill(ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
-    try {
-      await stationMarker.waitFor({ state: "visible", timeout: navigationTimeout });
-    } catch {
-      throw new Error(await describeRuijiePage(page));
-    }
+    await waitForStationOrLoginError(page, stationMarker);
   } else {
     console.log("Ruijie already has an authenticated station overview.");
   }
@@ -247,13 +243,30 @@ async function describeRuijiePage(page) {
   const currentUrl = new URL(page.url());
   const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
   const bodyText = await page.locator("body").innerText().catch(() => "");
-  const summary = bodyText
+  const summary = sanitizeRuijieText(bodyText).slice(0, 700);
+  return `Ruijie station names did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`;
+}
+
+async function waitForStationOrLoginError(page, stationMarker) {
+  const feedback = page.locator("#logintip, #msg, .rui-validator-tip, .alert");
+  const deadline = Date.now() + navigationTimeout;
+  while (Date.now() < deadline) {
+    if (await stationMarker.isVisible().catch(() => false)) return;
+    const messages = (await feedback.allTextContents().catch(() => []))
+      .map((value) => sanitizeRuijieText(value))
+      .filter((value) => value && !/^(logging in|please wait)/i.test(value));
+    if (messages.length) throw new Error(`Ruijie login response: ${messages.join(" | ").slice(0, 500)}`);
+    await page.waitForTimeout(250);
+  }
+  throw new Error(await describeRuijiePage(page));
+}
+
+function sanitizeRuijieText(value) {
+  return String(value)
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email hidden]")
     .replace(/\b\d{8,}\b/g, "[number hidden]")
     .replace(/\s+/g, " ")
-    .trim()
-    .slice(0, 700);
-  return `Ruijie station names did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`;
+    .trim();
 }
 
 function escapeWorkflowCommand(value) {
