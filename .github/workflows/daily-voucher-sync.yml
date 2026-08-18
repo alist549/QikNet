@@ -25,7 +25,7 @@ concurrency:
 
 jobs:
   sync:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, windows, x64, qiknet]
     timeout-minutes: 45
     env:
       QIKNET_EMAIL: ${{ secrets.QIKNET_EMAIL }}
@@ -36,7 +36,7 @@ jobs:
       STOCK_REPORT_RECIPIENT: ${{ secrets.STOCK_REPORT_RECIPIENT }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.dry_run) || vars.QIKNET_DRY_RUN }}
       SYNC_BRANCHES: ${{ github.event_name == 'workflow_dispatch' && inputs.branches || '' }}
-      HEADLESS: "true"
+      HEADLESS: "false"
 
     steps:
       - name: Check out automation
@@ -48,10 +48,10 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Run voucher sync
         run: npm run sync

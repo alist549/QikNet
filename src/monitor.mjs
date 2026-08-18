@@ -17,11 +17,11 @@ const navigationTimeout = parsePositiveInteger(process.env.NAVIGATION_TIMEOUT_MS
 const ruijieEmail = requiredEnv("RUIJIE_EMAIL");
 const ruijiePassword = requiredEnv("RUIJIE_PASSWORD");
 const smsToken = sendSms ? requiredEnv("SMSPOP_TOKEN") : process.env.SMSPOP_TOKEN;
-const defaultOutageRecipients = requiredEnv("DEFAULT_OUTAGE_RECIPIENTS")
+const defaultOutageRecipients = (sendSms ? requiredEnv("DEFAULT_OUTAGE_RECIPIENTS") : process.env.DEFAULT_OUTAGE_RECIPIENTS ?? "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
-const specialOutageRecipient = requiredEnv("SPECIAL_OUTAGE_RECIPIENT");
+const specialOutageRecipient = sendSms ? requiredEnv("SPECIAL_OUTAGE_RECIPIENT") : process.env.SPECIAL_OUTAGE_RECIPIENT;
 
 await mkdir(path.dirname(STATE_PATH), { recursive: true });
 await mkdir(REPORT_DIR, { recursive: true });
@@ -180,7 +180,7 @@ async function readStationStatuses(page) {
 
 function recipientsFor(branchName) {
   const recipients = [...defaultOutageRecipients];
-  if (config.sms.specialBranches.includes(branchName)) recipients.push(specialOutageRecipient);
+  if (specialOutageRecipient && config.sms.specialBranches.includes(branchName)) recipients.push(specialOutageRecipient);
   return [...new Set(recipients)];
 }
 

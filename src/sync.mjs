@@ -159,19 +159,27 @@ async function loginQikNet(page) {
 async function loginRuijie(page) {
   log("Signing in to Ruijie Cloud.");
   await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
-
-  const cookieAccept = page.getByRole("button", { name: "Accept", exact: true });
-  if (await cookieAccept.isVisible().catch(() => false)) await cookieAccept.click();
-
   const email = page.getByPlaceholder("Email Address (Account)");
-  if (await email.isVisible().catch(() => false)) {
+  const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
+
+  let initialState;
+  try {
+    initialState = await Promise.any([
+      email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
+      stationMarker.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+    ]);
+  } catch {
+    throw new Error("Neither the Ruijie sign-in form nor the QikNet station overview became visible.");
+  }
+
+  if (initialState === "login") {
+    const cookieAccept = page.getByRole("button", { name: "Accept", exact: true });
+    if (await cookieAccept.isVisible().catch(() => false)) await cookieAccept.click();
     await email.fill(credentials.ruijieEmail);
     await page.getByPlaceholder("Password").fill(credentials.ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
+    await waitForStationOrLoginError(page, stationMarker);
   }
-
-  await page.waitForURL(/adminIntl\/#\/monitor_overview_global_menu/, { timeout: navigationTimeout });
-  await page.getByText("Projects", { exact: true }).waitFor({ state: "visible" });
 
   const updateDialogClose = page.getByRole("button", { name: "Close", exact: true });
   if (await updateDialogClose.isVisible().catch(() => false)) await updateDialogClose.click();
@@ -246,7 +254,7 @@ function buildWorkList(inventory) {
 async function prepareRuijieExport(page, item) {
   log(`Reading Ruijie stock for ${item.branch.ruijieProject} / ${item.ruijieGroup}.`);
   await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
-  await page.getByText("Projects", { exact: true }).waitFor({ state: "visible" });
+  await page.getByText("QikNet HotSpot", { exact: false }).first().waitFor({ state: "visible" });
 
   const projectRow = page.getByRole("row").filter({ hasText: item.branch.ruijieProject });
   if ((await projectRow.count()) !== 1) {
@@ -430,6 +438,36 @@ function safeTimestamp(value) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+async function waitForStationOrLoginError(page, stationMarker) {
+  const feedback = page.locator("#logintip, #msg, .rui-validator-tip, .alert");
+  const deadline = Date.now() + navigationTimeout;
+  while (Date.now() < deadline) {
+    if (await stationMarker.isVisible().catch(() => false)) return;
+    const messages = (await feedback.allTextContents().catch(() => []))
+      .map((value) => sanitizeRuijieText(value))
+      .filter((value) => value && !/^(logging in|please wait)/i.test(value));
+    if (messages.length) throw new Error(`Ruijie login response: ${messages.join(" | ").slice(0, 500)}`);
+    await page.waitForTimeout(250);
+  }
+  throw new Error(await describeRuijiePage(page));
+}
+
+async function describeRuijiePage(page) {
+  const currentUrl = new URL(page.url());
+  const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const summary = sanitizeRuijieText(bodyText).slice(0, 700);
+  return `Ruijie station names did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`;
+}
+
+function sanitizeRuijieText(value) {
+  return String(value)
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email hidden]")
+    .replace(/\b\d{8,}\b/g, "[number hidden]")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function log(message) {

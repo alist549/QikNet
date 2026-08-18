@@ -1,3 +1,93 @@
 {
-  "stations": {}
+  "stations": {
+    "QikNet HotSpot 1: Unit L": {
+      "branchName": "Unit L",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 1,
+          "total": 1
+        }
+      ],
+      "notifiedRecipients": []
+    },
+    "QikNet HotSpot 2: Jambanja": {
+      "branchName": "Unit M",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 2,
+          "total": 2
+        }
+      ],
+      "notifiedRecipients": []
+    },
+    "QikNet HotSpot 3: Chikwanha": {
+      "branchName": "Chikwana",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 1,
+          "total": 1
+        }
+      ],
+      "notifiedRecipients": []
+    },
+    "QikNet HotSpot 4: Unit C": {
+      "branchName": "Unit C",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 1,
+          "total": 1
+        },
+        {
+          "name": "Wireless Bridge",
+          "online": 2,
+          "total": 2
+        }
+      ],
+      "notifiedRecipients": []
+    },
+    "QikNet HotSpot 5: Makoni": {
+      "branchName": "Makoni",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 1,
+          "total": 1
+        }
+      ],
+      "notifiedRecipients": []
+    },
+    "QikNet HotSpot 6: Unit O": {
+      "branchName": "Unit O",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 1,
+          "total": 1
+        }
+      ],
+      "notifiedRecipients": []
+    },
+    "QikNet HotSpot 7: Unit N": {
+      "branchName": "Unit N",
+      "status": "up",
+      "components": [
+        {
+          "name": "AP",
+          "online": 1,
+          "total": 1
+        }
+      ],
+      "notifiedRecipients": []
+    }
+  }
 }
