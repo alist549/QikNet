@@ -90,6 +90,7 @@ try {
   const message = formatError(error);
   report.errors.push({ message });
   console.error(`Station monitor failed: ${message}`);
+  console.error(`::error title=Ruijie station monitor failed::${escapeWorkflowCommand(message)}`);
 } finally {
   const stableState = sortState(nextState);
   if (Object.keys(stableState.stations).length) {
@@ -226,4 +227,8 @@ function safeTimestamp(value) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function escapeWorkflowCommand(value) {
+  return String(value).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
 }
