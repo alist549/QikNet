@@ -183,7 +183,7 @@ async function loginQikNet(page) {
 
 async function loginRuijie(page) {
   log("Signing in to Ruijie Cloud.");
-  await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(config.ruijie.projectsUrl, { waitUntil: "commit" });
   const email = page.getByPlaceholder("Email Address (Account)");
   const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
 
@@ -289,7 +289,7 @@ function buildWorkList(inventory) {
 
 async function prepareRuijieExport(page, item) {
   log(`Reading Ruijie stock for ${item.branch.ruijieProject} / ${item.ruijieGroup}.`);
-  await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
+  await page.goto(config.ruijie.projectsUrl, { waitUntil: "commit" });
   await page.getByText("QikNet HotSpot", { exact: false }).first().waitFor({ state: "visible" });
 
   const projectRow = page.getByRole("row").filter({ hasText: item.branch.ruijieProject });
