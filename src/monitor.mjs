@@ -87,7 +87,9 @@ try {
     report.stations.push(station);
   }
 } catch (error) {
-  report.errors.push({ message: formatError(error) });
+  const message = formatError(error);
+  report.errors.push({ message });
+  console.error(`Station monitor failed: ${message}`);
 } finally {
   const stableState = sortState(nextState);
   if (Object.keys(stableState.stations).length) {
@@ -103,19 +105,24 @@ try {
 }
 
 async function loginRuijie(page) {
+  console.log("Opening the Ruijie Cloud projects page...");
   await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
   const accept = page.getByRole("button", { name: "Accept", exact: true });
   if (await accept.isVisible().catch(() => false)) await accept.click();
 
   const email = page.getByPlaceholder("Email Address (Account)");
   if (await email.isVisible().catch(() => false)) {
+    console.log("Ruijie sign-in form found; signing in...");
     await email.fill(ruijieEmail);
     await page.getByPlaceholder("Password").fill(ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
+  } else {
+    console.log("Ruijie sign-in form not shown; checking the existing page session...");
   }
 
   await page.waitForURL(/adminIntl\/#\/monitor_overview_global_menu/, { timeout: navigationTimeout });
   await page.getByText("Projects", { exact: true }).waitFor({ state: "visible" });
+  console.log("Ruijie projects overview is ready.");
   const close = page.getByRole("button", { name: "Close", exact: true });
   if (await close.isVisible().catch(() => false)) await close.click();
 }
