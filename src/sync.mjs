@@ -220,6 +220,7 @@ async function readQikNetInventory(page) {
   log("Reading QikNet branch inventory.");
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
+  await page.getByText(/available vouchers/i).first().waitFor({ state: "visible", timeout: navigationTimeout });
 
   const records = [];
   const pageSummary = await page.locator("main").innerText();
