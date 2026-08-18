@@ -11,6 +11,7 @@ const REPORT_DIR = path.join(ROOT, "reports");
 
 const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 const dryRun = parseBoolean(process.env.DRY_RUN, true);
+const allowQikNetUpload = parseBoolean(process.env.ALLOW_QIKNET_UPLOAD, false);
 const headless = parseBoolean(process.env.HEADLESS, true);
 const actionTimeout = parsePositiveInteger(process.env.ACTION_TIMEOUT_MS, 20_000);
 const navigationTimeout = parsePositiveInteger(process.env.NAVIGATION_TIMEOUT_MS, 45_000);
@@ -36,17 +37,30 @@ const report = {
   inventory: [],
   inventoryAfter: [],
   actions: [],
-  sms: null,
+  sms: [],
   errors: [],
 };
+
+if (!dryRun && !allowQikNetUpload) {
+  throw new Error("Live QikNet upload is locked. Set both DRY_RUN=false and ALLOW_QIKNET_UPLOAD=true to enable it.");
+}
 
 await mkdir(DOWNLOAD_DIR, { recursive: true });
 await mkdir(REPORT_DIR, { recursive: true });
 
+const browserArgs = [
+  "--disable-backgrounding-occluded-windows",
+  "--disable-dev-shm-usage",
+  "--disable-gpu",
+  "--no-sandbox",
+];
+
 const browser = await chromium.launch({
   headless,
-  args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  args: browserArgs,
 });
+
+const ruijieBrowser = await chromium.launch({ headless, args: browserArgs });
 
 const context = await browser.newContext({
   acceptDownloads: true,
@@ -56,8 +70,16 @@ const context = await browser.newContext({
 context.setDefaultTimeout(actionTimeout);
 context.setDefaultNavigationTimeout(navigationTimeout);
 
+const ruijieContext = await ruijieBrowser.newContext({
+  acceptDownloads: true,
+  timezoneId: "Africa/Harare",
+  locale: "en-ZW",
+});
+ruijieContext.setDefaultTimeout(actionTimeout);
+ruijieContext.setDefaultNavigationTimeout(navigationTimeout);
+
 const qiknetPage = await context.newPage();
-const ruijiePage = await context.newPage();
+const ruijiePage = await ruijieContext.newPage();
 
 try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
@@ -74,39 +96,38 @@ try {
   } else {
     await loginRuijie(ruijiePage);
 
-    for (const item of work) {
-      try {
-        const action = await prepareRuijieExport(ruijiePage, item);
-
-        if (dryRun) {
+    if (dryRun) {
+      for (const item of work) {
+        try {
+          const action = await prepareRuijieExport(ruijiePage, item);
           action.status = "dry-run";
           report.actions.push(action);
           log(`[DRY RUN] ${item.branch.qiknetName} / ${item.qiknetGroup}: ${action.sourceCount} unused source voucher(s).`);
-          continue;
+        } catch (error) {
+          recordItemError(item, error);
         }
-
-        await uploadQikNetInventory(qiknetPage, item, action.filePath);
-        action.status = "uploaded";
-        report.actions.push(action);
-        log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
-      } catch (error) {
-        const message = formatError(error);
-        report.errors.push({
-          branch: item.branch.qiknetName,
-          voucherGroup: item.qiknetGroup,
-          message,
-        });
-        log(`ERROR ${item.branch.qiknetName} / ${item.qiknetGroup}: ${message}`);
       }
-    }
+      report.status = report.errors.length ? "completed-with-errors" : "dry-run-complete";
+    } else {
+      for (const item of work) {
+        try {
+          const action = await prepareRuijieExport(ruijiePage, item);
+          await uploadQikNetInventory(qiknetPage, item, action.filePath);
+          action.status = "uploaded";
+          report.actions.push(action);
+          log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
+        } catch (error) {
+          recordItemError(item, error);
+        }
+      }
 
-    if (!dryRun && report.actions.some((action) => action.status === "uploaded")) {
-      await qiknetPage.waitForTimeout(1_000);
-      report.inventoryAfter = await readQikNetInventory(qiknetPage);
-      verifyReplenishmentTargets(report.inventoryAfter);
+      if (report.actions.some((action) => action.status === "uploaded")) {
+        await qiknetPage.waitForTimeout(1_000);
+        report.inventoryAfter = await readQikNetInventory(qiknetPage);
+        verifyReplenishmentTargets(report.inventoryAfter);
+      }
+      report.status = report.errors.length ? "completed-with-errors" : "updated";
     }
-
-    report.status = report.errors.length ? "completed-with-errors" : dryRun ? "dry-run-complete" : "updated";
   }
 } catch (error) {
   report.status = "failed";
@@ -117,25 +138,28 @@ try {
   report.completedAt = new Date().toISOString();
 
   if (!dryRun) {
-    try {
-      await sendSmsCampaign({
-        token: process.env.SMSPOP_TOKEN,
-        campaignUrl: config.sms.campaignUrl,
-        senderId: config.sms.senderId,
-        recipient: requiredEnv("STOCK_REPORT_RECIPIENT"),
-        campaignName: "QikNet Daily Voucher Stock Report",
-        message: buildStockReportMessage(),
-      });
-      report.sms = { recipient: maskPhone(requiredEnv("STOCK_REPORT_RECIPIENT")), status: "sent" };
-    } catch (error) {
-      report.sms = { recipient: "configured stock-report recipient", status: "failed", message: formatError(error) };
-      report.errors.push({ message: `Stock report SMS failed: ${formatError(error)}` });
+    const stockRecipients = splitRecipients(requiredEnv("STOCK_REPORT_RECIPIENT"));
+    for (const recipient of stockRecipients) {
+      try {
+        await sendSmsCampaign({
+          token: process.env.SMSPOP_TOKEN,
+          campaignUrl: config.sms.campaignUrl,
+          senderId: config.sms.senderId,
+          recipient,
+          campaignName: "QikNet Daily Voucher Stock Report",
+          message: buildStockReportMessage(),
+        });
+        report.sms.push({ recipient: maskPhone(recipient), status: "sent" });
+      } catch (error) {
+        report.sms.push({ recipient: maskPhone(recipient), status: "failed", message: formatError(error) });
+        report.errors.push({ message: `Stock report SMS failed for ${maskPhone(recipient)}: ${formatError(error)}` });
+      }
     }
   }
 
   const reportPath = path.join(REPORT_DIR, `sync-${safeTimestamp(report.startedAt)}.json`);
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  await browser.close();
+  await Promise.allSettled([browser.close(), ruijieBrowser.close()]);
   log(`Report written to ${reportPath}`);
 
   if (report.errors.length) process.exitCode = 1;
@@ -146,32 +170,52 @@ async function loginQikNet(page) {
   await page.goto(config.qiknet.loginUrl, { waitUntil: "domcontentloaded" });
 
   const email = page.getByLabel("Email", { exact: true });
-  if (await email.isVisible().catch(() => false)) {
-    await email.fill(credentials.qiknetEmail);
-    await page.getByLabel("Password", { exact: true }).fill(credentials.qiknetPassword);
+  const dashboard = page.getByText("QikNet Control Center", { exact: true });
+  let initialState;
+  try {
+    initialState = await Promise.any([
+      email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
+      dashboard.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+    ]);
+  } catch {
+    throw new Error("Neither the QikNet sign-in form nor dashboard became visible.");
+  }
+
+  if (initialState === "login") {
+    await enterCredentialsHumanly(
+      page,
+      email,
+      page.getByLabel("Password", { exact: true }),
+      credentials.qiknetEmail,
+      credentials.qiknetPassword,
+      "QikNet",
+    );
     await page.getByRole("button", { name: "Login", exact: true }).click();
   }
 
-  await page.waitForURL(/\/super(?:#|$)/, { timeout: navigationTimeout });
-  await page.getByText("QikNet Control Center", { exact: true }).waitFor({ state: "visible" });
+  await waitForQikNetDashboardOrLoginError(page);
 }
 
 async function loginRuijie(page) {
   log("Signing in to Ruijie Cloud.");
-  await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
-
-  const cookieAccept = page.getByRole("button", { name: "Accept", exact: true });
-  if (await cookieAccept.isVisible().catch(() => false)) await cookieAccept.click();
-
   const email = page.getByPlaceholder("Email Address (Account)");
-  if (await email.isVisible().catch(() => false)) {
-    await email.fill(credentials.ruijieEmail);
-    await page.getByPlaceholder("Password").fill(credentials.ruijiePassword);
-    await page.getByRole("button", { name: "Login", exact: true }).click();
-  }
+  const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
+  const initialState = await openRuijieProjects(page, email, stationMarker);
 
-  await page.waitForURL(/adminIntl\/#\/monitor_overview_global_menu/, { timeout: navigationTimeout });
-  await page.getByText("Projects", { exact: true }).waitFor({ state: "visible" });
+  if (initialState === "login") {
+    const cookieAccept = page.getByRole("button", { name: "Accept", exact: true });
+    if (await cookieAccept.isVisible().catch(() => false)) await cookieAccept.click();
+    await enterCredentialsHumanly(
+      page,
+      email,
+      page.getByPlaceholder("Password"),
+      credentials.ruijieEmail,
+      credentials.ruijiePassword,
+      "Ruijie",
+    );
+    await page.getByRole("button", { name: "Login", exact: true }).click();
+    await waitForStationOrLoginError(page, stationMarker);
+  }
 
   const updateDialogClose = page.getByRole("button", { name: "Close", exact: true });
   if (await updateDialogClose.isVisible().catch(() => false)) await updateDialogClose.click();
@@ -181,6 +225,7 @@ async function readQikNetInventory(page) {
   log("Reading QikNet branch inventory.");
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
+  await page.getByText(/available vouchers/i).first().waitFor({ state: "visible", timeout: navigationTimeout });
 
   const records = [];
   const pageSummary = await page.locator("main").innerText();
@@ -208,6 +253,10 @@ async function readQikNetInventory(page) {
 
       records.push({ branchName, totalAvailable, groups });
     }
+  }
+
+  if (!records.length) {
+    throw new Error(`No QikNet inventory cards were parsed. Visible inventory: ${sanitizePageText(pageSummary).slice(0, 1_500)}`);
   }
 
   return records;
@@ -245,8 +294,10 @@ function buildWorkList(inventory) {
 
 async function prepareRuijieExport(page, item) {
   log(`Reading Ruijie stock for ${item.branch.ruijieProject} / ${item.ruijieGroup}.`);
-  await page.goto(config.ruijie.projectsUrl, { waitUntil: "domcontentloaded" });
-  await page.getByText("Projects", { exact: true }).waitFor({ state: "visible" });
+  const email = page.getByPlaceholder("Email Address (Account)");
+  const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
+  const state = await openRuijieProjects(page, email, stationMarker);
+  if (state !== "ready") throw new Error("Ruijie returned to the sign-in page during voucher export.");
 
   const projectRow = page.getByRole("row").filter({ hasText: item.branch.ruijieProject });
   if ((await projectRow.count()) !== 1) {
@@ -430,6 +481,114 @@ function safeTimestamp(value) {
 
 function formatError(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function splitRecipients(value) {
+  return [...new Set(String(value).split(",").map((recipient) => recipient.trim()).filter(Boolean))];
+}
+
+function recordItemError(item, error) {
+  const message = formatError(error);
+  report.errors.push({
+    branch: item.branch.qiknetName,
+    voucherGroup: item.qiknetGroup,
+    message,
+  });
+  log(`ERROR ${item.branch.qiknetName} / ${item.qiknetGroup}: ${message}`);
+}
+
+async function openRuijieProjects(page, email, stationMarker) {
+  await page.bringToFront();
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      await page.goto(config.ruijie.projectsUrl, { waitUntil: "commit", timeout: navigationTimeout });
+      return await Promise.any([
+        email.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "login"),
+        stationMarker.waitFor({ state: "visible", timeout: navigationTimeout }).then(() => "ready"),
+      ]);
+    } catch (error) {
+      lastError = error;
+      log(`Ruijie projects page was not ready (attempt ${attempt}/3).`);
+      if (attempt < 3) await page.waitForTimeout(attempt * 2_000);
+    }
+  }
+
+  throw new Error(`Neither the Ruijie sign-in form nor station overview became visible after 3 attempts: ${formatError(lastError)}`);
+}
+
+async function waitForStationOrLoginError(page, stationMarker) {
+  const feedback = page.locator("#logintip, #msg, .rui-validator-tip, .alert");
+  const deadline = Date.now() + navigationTimeout;
+  while (Date.now() < deadline) {
+    if (await stationMarker.isVisible().catch(() => false)) return;
+    const messages = (await feedback.allTextContents().catch(() => []))
+      .map((value) => sanitizeRuijieText(value))
+      .filter((value) => value && !/^(logging in|please wait)/i.test(value));
+    if (messages.length) throw new Error(`Ruijie login response: ${messages.join(" | ").slice(0, 500)}`);
+    await page.waitForTimeout(250);
+  }
+  throw new Error(await describeRuijiePage(page));
+}
+
+async function waitForQikNetDashboardOrLoginError(page) {
+  const dashboard = page.getByText("QikNet Control Center", { exact: true });
+  const feedback = page.locator('[role="alert"], .alert');
+  const deadline = Date.now() + navigationTimeout;
+  while (Date.now() < deadline) {
+    if (/\/super(?:#|$)/.test(page.url()) && await dashboard.isVisible().catch(() => false)) return;
+    const messages = (await feedback.allTextContents().catch(() => []))
+      .map((value) => sanitizePageText(value))
+      .filter(Boolean);
+    if (messages.length) throw new Error(`QikNet login response: ${messages.join(" | ").slice(0, 500)}`);
+    await page.waitForTimeout(250);
+  }
+
+  const currentUrl = new URL(page.url());
+  const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const summary = sanitizePageText(bodyText).slice(0, 700);
+  throw new Error(`QikNet dashboard did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`);
+}
+
+async function describeRuijiePage(page) {
+  const currentUrl = new URL(page.url());
+  const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const summary = sanitizeRuijieText(bodyText).slice(0, 700);
+  return `Ruijie station names did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`;
+}
+
+function sanitizeRuijieText(value) {
+  return sanitizePageText(value);
+}
+
+function sanitizePageText(value) {
+  return String(value)
+    .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email hidden]")
+    .replace(/\b\d{8,}\b/g, "[number hidden]")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue, provider) {
+  await page.waitForTimeout(randomInteger(700, 1_300));
+  await emailField.fill("");
+  await emailField.click();
+  log(`Entering the ${provider} account at human pace.`);
+  await page.keyboard.type(emailValue, { delay: randomInteger(65, 105) });
+  await page.waitForTimeout(randomInteger(450, 900));
+  await passwordField.fill("");
+  await passwordField.click();
+  log(`Entering the ${provider} password at human pace.`);
+  await page.keyboard.type(passwordValue, { delay: randomInteger(70, 115) });
+  await page.waitForTimeout(randomInteger(700, 1_300));
+  log(`${provider} credentials entered; submitting the form.`);
+}
+
+function randomInteger(minimum, maximum) {
+  return Math.floor(Math.random() * (maximum - minimum + 1)) + minimum;
 }
 
 function log(message) {

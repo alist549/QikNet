@@ -1,3 +1,8 @@
+param(
+    [ValidateSet("sync", "monitor", "check")]
+    [string]$Job = "sync"
+)
+
 $ErrorActionPreference = "Stop"
 
 if (-not (Test-Path ".env")) {
@@ -15,4 +20,4 @@ Get-Content ".env" | ForEach-Object {
 
 npm install --no-audit --no-fund
 npx playwright install chromium
-npm run sync
+npm run $Job

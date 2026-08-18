@@ -3,10 +3,13 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { maskPhone, sendSmsCampaign } from "./sms.mjs";
+import { addMinutes, isAlertDue, nextAlertDelayMinutes } from "./alert-schedule.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const CONFIG_PATH = path.join(ROOT, "config", "sync.config.json");
-const STATE_PATH = path.join(ROOT, "state", "station-status.json");
+const STATE_PATH = process.env.STATION_STATE_PATH
+  ? path.resolve(process.env.STATION_STATE_PATH)
+  : path.join(ROOT, "state", "station-status.json");
 const REPORT_DIR = path.join(ROOT, "reports", "monitor");
 const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 
@@ -17,11 +20,11 @@ const navigationTimeout = parsePositiveInteger(process.env.NAVIGATION_TIMEOUT_MS
 const ruijieEmail = requiredEnv("RUIJIE_EMAIL");
 const ruijiePassword = requiredEnv("RUIJIE_PASSWORD");
 const smsToken = sendSms ? requiredEnv("SMSPOP_TOKEN") : process.env.SMSPOP_TOKEN;
-const defaultOutageRecipients = requiredEnv("DEFAULT_OUTAGE_RECIPIENTS")
+const defaultOutageRecipients = (sendSms ? requiredEnv("DEFAULT_OUTAGE_RECIPIENTS") : process.env.DEFAULT_OUTAGE_RECIPIENTS ?? "")
   .split(",")
   .map((value) => value.trim())
   .filter(Boolean);
-const specialOutageRecipient = requiredEnv("SPECIAL_OUTAGE_RECIPIENT");
+const specialOutageRecipient = sendSms ? requiredEnv("SPECIAL_OUTAGE_RECIPIENT") : process.env.SPECIAL_OUTAGE_RECIPIENT;
 
 await mkdir(path.dirname(STATE_PATH), { recursive: true });
 await mkdir(REPORT_DIR, { recursive: true });
@@ -38,7 +41,12 @@ const report = {
 
 const browser = await chromium.launch({
   headless,
-  args: ["--disable-dev-shm-usage", "--no-sandbox"],
+  args: [
+    "--disable-backgrounding-occluded-windows",
+    "--disable-dev-shm-usage",
+    "--disable-gpu",
+    "--no-sandbox",
+  ],
 });
 const context = await browser.newContext({ timezoneId: "Africa/Harare", locale: "en-ZW" });
 context.setDefaultTimeout(actionTimeout);
@@ -53,10 +61,14 @@ try {
     const previous = previousState.stations?.[station.projectName] ?? {};
     const alerting = ["down", "degraded"].includes(station.status);
     const sameIncident = alerting && previous.status === station.status;
-    const notifiedRecipients = sameIncident ? [...(previous.notifiedRecipients ?? [])] : [];
     const requiredRecipients = recipientsFor(station.branchName);
-    const pendingRecipients = alerting
-      ? requiredRecipients.filter((recipient) => !notifiedRecipients.includes(maskPhone(recipient)))
+    let alertCount = sameIncident ? Number(previous.alertCount ?? 0) : 0;
+    let lastAlertAt = sameIncident ? previous.lastAlertAt ?? null : null;
+    let nextAlertAt = sameIncident ? previous.nextAlertAt ?? null : null;
+    let cycleNotifiedRecipients = sameIncident ? [...(previous.cycleNotifiedRecipients ?? [])] : [];
+    const alertDue = alerting && isAlertDue(report.checkedAt, alertCount, nextAlertAt);
+    const pendingRecipients = alertDue
+      ? requiredRecipients.filter((recipient) => !cycleNotifiedRecipients.includes(maskPhone(recipient)))
       : [];
 
     if (sendSms) {
@@ -70,11 +82,20 @@ try {
             campaignName: `QikNet Station Alert ${station.branchName}`,
             message: buildAlertMessage(station),
           });
-          notifiedRecipients.push(maskPhone(recipient));
+          cycleNotifiedRecipients.push(maskPhone(recipient));
           report.notifications.push({ branch: station.branchName, recipient: maskPhone(recipient), status: "sent" });
         } catch (error) {
           report.errors.push({ branch: station.branchName, recipient: maskPhone(recipient), message: formatError(error) });
         }
+      }
+
+      const requiredMasked = requiredRecipients.map(maskPhone);
+      const cycleComplete = alertDue && requiredMasked.every((recipient) => cycleNotifiedRecipients.includes(recipient));
+      if (cycleComplete) {
+        alertCount += 1;
+        lastAlertAt = report.checkedAt;
+        nextAlertAt = addMinutes(report.checkedAt, nextAlertDelayMinutes(alertCount));
+        cycleNotifiedRecipients = [];
       }
     }
 
@@ -82,9 +103,12 @@ try {
       branchName: station.branchName,
       status: station.status,
       components: station.components,
-      notifiedRecipients: alerting ? notifiedRecipients.sort() : [],
+      alertCount: alerting ? alertCount : 0,
+      lastAlertAt: alerting ? lastAlertAt : null,
+      nextAlertAt: alerting ? nextAlertAt : null,
+      cycleNotifiedRecipients: alerting ? cycleNotifiedRecipients.sort() : [],
     };
-    report.stations.push(station);
+    report.stations.push({ ...station, alertCount, nextAlertAt, alertDue });
   }
 } catch (error) {
   const message = formatError(error);
@@ -125,8 +149,7 @@ async function loginRuijie(page) {
   if (initialState === "login") {
     console.log("Ruijie sign-in form found; signing in...");
     if (await accept.isVisible().catch(() => false)) await accept.click();
-    await email.fill(ruijieEmail);
-    await page.getByPlaceholder("Password").fill(ruijiePassword);
+    await enterCredentialsHumanly(page, email, page.getByPlaceholder("Password"), ruijieEmail, ruijiePassword);
     await page.getByRole("button", { name: "Login", exact: true }).click();
     await waitForStationOrLoginError(page, stationMarker);
   } else {
@@ -180,7 +203,7 @@ async function readStationStatuses(page) {
 
 function recipientsFor(branchName) {
   const recipients = [...defaultOutageRecipients];
-  if (config.sms.specialBranches.includes(branchName)) recipients.push(specialOutageRecipient);
+  if (specialOutageRecipient && config.sms.specialBranches.includes(branchName)) recipients.push(specialOutageRecipient);
   return [...new Set(recipients)];
 }
 
@@ -271,4 +294,23 @@ function sanitizeRuijieText(value) {
 
 function escapeWorkflowCommand(value) {
   return String(value).replaceAll("%", "%25").replaceAll("\r", "%0D").replaceAll("\n", "%0A");
+}
+
+async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue) {
+  await page.waitForTimeout(randomInteger(700, 1_300));
+  await emailField.fill("");
+  await emailField.click();
+  console.log("Entering the Ruijie account at human pace...");
+  await page.keyboard.type(emailValue, { delay: randomInteger(65, 105) });
+  await page.waitForTimeout(randomInteger(450, 900));
+  await passwordField.fill("");
+  await passwordField.click();
+  console.log("Entering the Ruijie password at human pace...");
+  await page.keyboard.type(passwordValue, { delay: randomInteger(70, 115) });
+  await page.waitForTimeout(randomInteger(700, 1_300));
+  console.log("Ruijie credentials entered; submitting the form.");
+}
+
+function randomInteger(minimum, maximum) {
+  return Math.floor(Math.random() * (maximum - minimum + 1)) + minimum;
 }

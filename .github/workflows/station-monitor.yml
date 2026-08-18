@@ -12,7 +12,7 @@ on:
         type: boolean
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
   group: qiknet-automation
@@ -20,7 +20,7 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, windows, x64, qiknet]
     timeout-minutes: 20
     env:
       RUIJIE_EMAIL: ${{ secrets.RUIJIE_EMAIL }}
@@ -28,8 +28,10 @@ jobs:
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
       DEFAULT_OUTAGE_RECIPIENTS: ${{ secrets.DEFAULT_OUTAGE_RECIPIENTS }}
       SPECIAL_OUTAGE_RECIPIENT: ${{ secrets.SPECIAL_OUTAGE_RECIPIENT }}
-      SEND_SMS: ${{ github.event_name == 'schedule' && 'true' || toJSON(inputs.send_sms) }}
-      HEADLESS: "true"
+      # Keep scheduled alerts disabled until recipient routing is validated.
+      SEND_SMS: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.send_sms) || 'false' }}
+      HEADLESS: "false"
+      STATION_STATE_PATH: C:\qiknet-data\station-status.json
 
     steps:
       - name: Check out automation and alert state
@@ -41,26 +43,13 @@ jobs:
           node-version: "22"
 
       - name: Install dependencies
-        run: npm install --no-audit --no-fund
+        run: npm ci --no-audit --no-fund
 
       - name: Install Chromium
-        run: npx playwright install --with-deps chromium
+        run: npx playwright install chromium
 
       - name: Check station status
         run: npm run monitor
-
-      - name: Persist alert state
-        if: always()
-        run: |
-          git config user.name "qiknet-monitor[bot]"
-          git config user.email "qiknet-monitor[bot]@users.noreply.github.com"
-          git add state/station-status.json
-          if git diff --cached --quiet; then
-            echo "No station-state change."
-          else
-            git commit -m "Update station alert state"
-            git push
-          fi
 
       - name: Upload monitor report
         if: always()
