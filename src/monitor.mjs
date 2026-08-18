@@ -3,6 +3,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { maskPhone, sendSmsCampaign } from "./sms.mjs";
+import { addMinutes, isAlertDue, nextAlertDelayMinutes } from "./alert-schedule.mjs";
 
 const ROOT = path.resolve(import.meta.dirname, "..");
 const CONFIG_PATH = path.join(ROOT, "config", "sync.config.json");
@@ -60,10 +61,14 @@ try {
     const previous = previousState.stations?.[station.projectName] ?? {};
     const alerting = ["down", "degraded"].includes(station.status);
     const sameIncident = alerting && previous.status === station.status;
-    const notifiedRecipients = sameIncident ? [...(previous.notifiedRecipients ?? [])] : [];
     const requiredRecipients = recipientsFor(station.branchName);
-    const pendingRecipients = alerting
-      ? requiredRecipients.filter((recipient) => !notifiedRecipients.includes(maskPhone(recipient)))
+    let alertCount = sameIncident ? Number(previous.alertCount ?? 0) : 0;
+    let lastAlertAt = sameIncident ? previous.lastAlertAt ?? null : null;
+    let nextAlertAt = sameIncident ? previous.nextAlertAt ?? null : null;
+    let cycleNotifiedRecipients = sameIncident ? [...(previous.cycleNotifiedRecipients ?? [])] : [];
+    const alertDue = alerting && isAlertDue(report.checkedAt, alertCount, nextAlertAt);
+    const pendingRecipients = alertDue
+      ? requiredRecipients.filter((recipient) => !cycleNotifiedRecipients.includes(maskPhone(recipient)))
       : [];
 
     if (sendSms) {
@@ -77,11 +82,20 @@ try {
             campaignName: `QikNet Station Alert ${station.branchName}`,
             message: buildAlertMessage(station),
           });
-          notifiedRecipients.push(maskPhone(recipient));
+          cycleNotifiedRecipients.push(maskPhone(recipient));
           report.notifications.push({ branch: station.branchName, recipient: maskPhone(recipient), status: "sent" });
         } catch (error) {
           report.errors.push({ branch: station.branchName, recipient: maskPhone(recipient), message: formatError(error) });
         }
+      }
+
+      const requiredMasked = requiredRecipients.map(maskPhone);
+      const cycleComplete = alertDue && requiredMasked.every((recipient) => cycleNotifiedRecipients.includes(recipient));
+      if (cycleComplete) {
+        alertCount += 1;
+        lastAlertAt = report.checkedAt;
+        nextAlertAt = addMinutes(report.checkedAt, nextAlertDelayMinutes(alertCount));
+        cycleNotifiedRecipients = [];
       }
     }
 
@@ -89,9 +103,12 @@ try {
       branchName: station.branchName,
       status: station.status,
       components: station.components,
-      notifiedRecipients: alerting ? notifiedRecipients.sort() : [],
+      alertCount: alerting ? alertCount : 0,
+      lastAlertAt: alerting ? lastAlertAt : null,
+      nextAlertAt: alerting ? nextAlertAt : null,
+      cycleNotifiedRecipients: alerting ? cycleNotifiedRecipients.sort() : [],
     };
-    report.stations.push(station);
+    report.stations.push({ ...station, alertCount, nextAlertAt, alertDue });
   }
 } catch (error) {
   const message = formatError(error);
