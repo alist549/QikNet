@@ -1,0 +1,19 @@
+{
+  "name": "qiknet-voucher-sync",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Daily QikNet and Ruijie Cloud voucher inventory synchronizer",
+  "scripts": {
+    "check": "node --check src/sync.mjs && node --check src/monitor.mjs && node --check src/sms.mjs && node --check src/test-sms.mjs",
+    "sync": "node src/sync.mjs",
+    "monitor": "node src/monitor.mjs",
+    "test:sms": "node src/test-sms.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.54.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
