@@ -156,13 +156,18 @@ async function loginQikNet(page) {
 
   const email = page.getByLabel("Email", { exact: true });
   if (await email.isVisible().catch(() => false)) {
-    await email.fill(credentials.qiknetEmail);
-    await page.getByLabel("Password", { exact: true }).fill(credentials.qiknetPassword);
+    await enterCredentialsHumanly(
+      page,
+      email,
+      page.getByLabel("Password", { exact: true }),
+      credentials.qiknetEmail,
+      credentials.qiknetPassword,
+      "QikNet",
+    );
     await page.getByRole("button", { name: "Login", exact: true }).click();
   }
 
-  await page.waitForURL(/\/super(?:#|$)/, { timeout: navigationTimeout });
-  await page.getByText("QikNet Control Center", { exact: true }).waitFor({ state: "visible" });
+  await waitForQikNetDashboardOrLoginError(page);
 }
 
 async function loginRuijie(page) {
@@ -190,6 +195,7 @@ async function loginRuijie(page) {
       page.getByPlaceholder("Password"),
       credentials.ruijieEmail,
       credentials.ruijiePassword,
+      "Ruijie",
     );
     await page.getByRole("button", { name: "Login", exact: true }).click();
     await waitForStationOrLoginError(page, stationMarker);
@@ -478,6 +484,26 @@ async function waitForStationOrLoginError(page, stationMarker) {
   throw new Error(await describeRuijiePage(page));
 }
 
+async function waitForQikNetDashboardOrLoginError(page) {
+  const dashboard = page.getByText("QikNet Control Center", { exact: true });
+  const feedback = page.locator('[role="alert"], .alert, .error, [class*="error"], [class*="invalid"]');
+  const deadline = Date.now() + navigationTimeout;
+  while (Date.now() < deadline) {
+    if (/\/super(?:#|$)/.test(page.url()) && await dashboard.isVisible().catch(() => false)) return;
+    const messages = (await feedback.allTextContents().catch(() => []))
+      .map((value) => sanitizePageText(value))
+      .filter(Boolean);
+    if (messages.length) throw new Error(`QikNet login response: ${messages.join(" | ").slice(0, 500)}`);
+    await page.waitForTimeout(250);
+  }
+
+  const currentUrl = new URL(page.url());
+  const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
+  const bodyText = await page.locator("body").innerText().catch(() => "");
+  const summary = sanitizePageText(bodyText).slice(0, 700);
+  throw new Error(`QikNet dashboard did not become visible at ${safeLocation}. Visible page: ${summary || "(blank)"}`);
+}
+
 async function describeRuijiePage(page) {
   const currentUrl = new URL(page.url());
   const safeLocation = `${currentUrl.origin}${currentUrl.pathname}${currentUrl.hash}`;
@@ -487,6 +513,10 @@ async function describeRuijiePage(page) {
 }
 
 function sanitizeRuijieText(value) {
+  return sanitizePageText(value);
+}
+
+function sanitizePageText(value) {
   return String(value)
     .replace(/[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}/gi, "[email hidden]")
     .replace(/\b\d{8,}\b/g, "[number hidden]")
@@ -494,19 +524,19 @@ function sanitizeRuijieText(value) {
     .trim();
 }
 
-async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue) {
+async function enterCredentialsHumanly(page, emailField, passwordField, emailValue, passwordValue, provider) {
   await page.waitForTimeout(randomInteger(700, 1_300));
   await emailField.fill("");
   await emailField.click();
-  log("Entering the Ruijie account at human pace.");
+  log(`Entering the ${provider} account at human pace.`);
   await page.keyboard.type(emailValue, { delay: randomInteger(65, 105) });
   await page.waitForTimeout(randomInteger(450, 900));
   await passwordField.fill("");
   await passwordField.click();
-  log("Entering the Ruijie password at human pace.");
+  log(`Entering the ${provider} password at human pace.`);
   await page.keyboard.type(passwordValue, { delay: randomInteger(70, 115) });
   await page.waitForTimeout(randomInteger(700, 1_300));
-  log("Ruijie credentials entered; submitting the form.");
+  log(`${provider} credentials entered; submitting the form.`);
 }
 
 function randomInteger(minimum, maximum) {
