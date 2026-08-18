@@ -31,7 +31,8 @@ if ($actualSha256 -ne $runnerSha256) {
     throw "GitHub Actions runner checksum mismatch."
 }
 
-Expand-Archive -LiteralPath $runnerZip -DestinationPath $runnerRoot -Force
+Add-Type -AssemblyName System.IO.Compression.FileSystem
+[System.IO.Compression.ZipFile]::ExtractToDirectory($runnerZip, $runnerRoot)
 Remove-Item -LiteralPath $runnerZip -Force
 
 $registrationToken = Read-Host "Paste a fresh one-hour GitHub runner registration token"
