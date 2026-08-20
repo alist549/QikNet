@@ -456,9 +456,20 @@ async function collectRuijieVoucherCodes(page, panel, limit) {
   let previousPageSignature = "";
 
   for (let pageNumber = 1; pageNumber <= 30 && codes.size < limit; pageNumber += 1) {
-    const table = panel.locator("table:visible").last();
+    const tables = panel.locator("table:visible");
+    let table;
+    for (let index = 0; index < await tables.count(); index += 1) {
+      const candidate = tables.nth(index);
+      if (await candidate.locator("tbody tr").count()) {
+        table = candidate;
+        break;
+      }
+    }
+    if (!table) throw new Error("Ruijie voucher table body was not found.");
     await table.waitFor({ state: "visible", timeout: navigationTimeout });
-    const headers = (await table.locator("thead th").allInnerTexts()).map((value) => value.trim());
+
+    // Element UI renders the header and body as separate sibling tables.
+    const headers = (await panel.locator("th:visible").allInnerTexts()).map((value) => value.trim());
     const codeColumn = headers.findIndex((value) => /voucher\s*(code|number)|^code$/i.test(value));
     if (codeColumn < 0) {
       throw new Error(`Ruijie voucher-code column was not found. Table columns: ${headers.join(", ")}`);
