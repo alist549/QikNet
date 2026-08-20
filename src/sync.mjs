@@ -539,13 +539,9 @@ async function uploadQikNetInventory(page, item, vouchers) {
     ? labelledGroupSelect
     : scope.getByRole("combobox").first();
   if (await groupSelect.isVisible().catch(() => false)) {
-    await groupSelect.click();
-    const groupOption = page.getByRole("option", { name: item.qiknetGroup, exact: true });
-    if (await groupOption.isVisible().catch(() => false)) {
-      await groupOption.click();
-    } else {
-      await page.getByText(item.qiknetGroup, { exact: true }).last().click();
-    }
+    await groupSelect.selectOption({ label: item.qiknetGroup });
+  } else {
+    throw new Error("QikNet voucher-group selector was not found in the text-upload form.");
   }
 
   const voucherText = scope.locator('textarea:visible, [contenteditable="true"]:visible').last();
