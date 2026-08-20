@@ -131,7 +131,9 @@ try {
       }
 
       if (report.actions.some((action) => action.status === "uploaded")) {
-        await qiknetPage.waitForTimeout(1_000);
+        // QikNet accepts the text upload immediately but updates inventory
+        // asynchronously; Unit M consistently settled within this window.
+        await qiknetPage.waitForTimeout(30_000);
         report.inventoryAfter = await readQikNetInventoryWithRetry(qiknetPage, "QikNet post-upload inventory scan");
         verifyReplenishmentTargets(report.inventoryAfter);
       }
