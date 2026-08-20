@@ -34,6 +34,9 @@ jobs:
       QIKNET_PASSWORD: ${{ secrets.QIKNET_PASSWORD }}
       RUIJIE_EMAIL: ${{ secrets.RUIJIE_EMAIL }}
       RUIJIE_PASSWORD: ${{ secrets.RUIJIE_PASSWORD }}
+      RUIJIE_API_APP_ID: ${{ secrets.RUIJIE_API_APP_ID }}
+      RUIJIE_API_SECRET: ${{ secrets.RUIJIE_API_SECRET }}
+      RUIJIE_API_BASE_URL: "https://cloud-eu.ruijienetworks.com"
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
       STOCK_REPORT_RECIPIENT: ${{ secrets.STOCK_REPORT_RECIPIENT }}
       DRY_RUN: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.dry_run) || vars.QIKNET_DRY_RUN }}
