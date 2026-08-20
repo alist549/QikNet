@@ -54,6 +54,26 @@ for (const match of matches) {
   const unique = [...new Map(safeEntities.map((entry) => [JSON.stringify(entry), entry])).values()];
   console.log(`Voucher/user-group metadata for ${match.name}:`);
   for (const entry of unique) console.log(`- ${JSON.stringify(entry)}`);
+  const vouchers = await apiGet(`/service/api/intlSamVoucher/getList/${encodeURIComponent(account.account)}/${encodeURIComponent(match.groupId)}`, {
+    start: "0",
+    pageSize: "1000",
+    status: "1",
+  });
+  const automated = vouchers.voucherData?.list?.filter((voucher) =>
+    String(voucher.comment ?? "").startsWith("QikNet automated refill:")) ?? [];
+  const counts = new Map();
+  for (const voucher of automated) {
+    const profileId = String(voucher.profileId ?? "unknown");
+    counts.set(profileId, (counts.get(profileId) ?? 0) + 1);
+  }
+  console.log(`Unused automated voucher counts by profile: ${JSON.stringify(Object.fromEntries(counts))}`);
+  const commentCounts = new Map();
+  for (const voucher of automated) {
+    const comment = String(voucher.comment ?? "unknown");
+    commentCounts.set(comment, (commentCounts.get(comment) ?? 0) + 1);
+  }
+  console.log(`Unused automated voucher counts by comment: ${JSON.stringify(Object.fromEntries(commentCounts))}`);
+  console.log(`Voucher record fields: ${(automated[0] ? Object.keys(automated[0]) : []).filter((key) => !/code|uuid|email|phone|name/i.test(key)).join(", ")}`);
 }
 
 function walkMetadata(value, found) {

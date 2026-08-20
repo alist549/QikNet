@@ -514,28 +514,36 @@ async function collectRuijieVoucherCodes(page, panel, limit) {
 
 async function uploadQikNetInventory(page, item, vouchers) {
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
+  // A hash-only navigation can leave a failed upload modal mounted.
+  if (await page.locator("div.fixed.inset-0.z-50").last().isVisible().catch(() => false)) {
+    await page.reload({ waitUntil: "domcontentloaded" });
+  }
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
   const card = await findQikNetBranchCardWithRetry(page, item.branch.qiknetName);
 
   await card.getByRole("button", { name: "Add inventory", exact: true }).click();
   await page.getByRole("heading", { name: item.branch.qiknetName, exact: true }).waitFor({ state: "visible" });
 
-  const textMode = page.getByRole("button", { name: /text|manual|comma/i }).locator(":visible").first();
-  if (await textMode.isVisible().catch(() => false)) await textMode.click();
+  const textMode = page.getByRole("button", { name: "Text upload", exact: true });
+  await textMode.waitFor({ state: "visible" });
+  await textMode.click();
 
-  const dialog = page.getByRole("dialog").locator(":visible").last();
-  const scope = await dialog.isVisible().catch(() => false) ? dialog : page;
-  const labelledGroupSelect = scope.getByLabel(/voucher.*group|profile|category/i).locator(":visible").first();
+  const dialog = page.getByRole("dialog").last();
+  const overlay = page.locator("div.fixed.inset-0.z-50").last();
+  const scope = await dialog.isVisible().catch(() => false)
+    ? dialog
+    : await overlay.isVisible().catch(() => false) ? overlay : page;
+  const labelledGroupSelect = scope.getByLabel(/voucher.*group|profile|category/i).first();
   const groupSelect = await labelledGroupSelect.isVisible().catch(() => false)
     ? labelledGroupSelect
-    : scope.getByRole("combobox").locator(":visible").first();
+    : scope.getByRole("combobox").first();
   if (await groupSelect.isVisible().catch(() => false)) {
     await groupSelect.click();
     const groupOption = page.getByRole("option", { name: item.qiknetGroup, exact: true });
     if (await groupOption.isVisible().catch(() => false)) {
       await groupOption.click();
     } else {
-      await page.getByText(item.qiknetGroup, { exact: true }).locator(":visible").last().click();
+      await page.getByText(item.qiknetGroup, { exact: true }).last().click();
     }
   }
 
@@ -548,7 +556,6 @@ async function uploadQikNetInventory(page, item, vouchers) {
 
   const uploadButton = scope
     .getByRole("button", { name: /upload.*voucher|add.*voucher|save/i })
-    .locator(":visible")
     .last();
   if (!(await uploadButton.isVisible().catch(() => false))) {
     const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
@@ -783,10 +790,18 @@ async function createRuijieApiVouchers(item) {
   const session = await getRuijieSession();
   const groupId = await getRuijieProjectId(item.branch.ruijieProject, session.accessToken);
   const profile = await getRuijieVoucherProfile(groupId, item.ruijieGroup, session.accessToken);
-  const vouchers = [];
+  const comment = `QikNet automated refill: ${item.branch.qiknetName} / ${item.qiknetGroup}`;
+  const vouchers = await listReusableRuijieVouchers({
+    session,
+    groupId,
+    profile,
+    comment,
+    limit: requestedCount,
+  });
 
   if (!dryRun) {
-    for (let remaining = requestedCount; remaining > 0; remaining -= 100) {
+    const reusedCount = vouchers.length;
+    for (let remaining = requestedCount - reusedCount; remaining > 0; remaining -= 100) {
       const quantity = Math.min(100, remaining);
       const result = await ruijieApiRequest(
         `/service/api/intlSamVoucher/create/${encodeURIComponent(session.tenantName)}/${encodeURIComponent(session.userName)}/${encodeURIComponent(groupId)}`,
@@ -797,7 +812,7 @@ async function createRuijieApiVouchers(item) {
             quantity,
             profile: profile.authProfileId,
             userGroupId: profile.userGroupId,
-            comment: `QikNet automated refill: ${item.branch.qiknetName} / ${item.qiknetGroup}`,
+            comment,
           },
         },
       );
@@ -808,7 +823,8 @@ async function createRuijieApiVouchers(item) {
       if (created.length !== quantity) throw new Error(`Ruijie API created ${created.length} of ${quantity} requested vouchers.`);
       vouchers.push(...created);
     }
-    log(`Ruijie API created ${vouchers.length} voucher(s) for ${item.qiknetGroup}.`);
+    const createdCount = vouchers.length - reusedCount;
+    log(`Ruijie API supplied ${vouchers.length} voucher(s) for ${item.qiknetGroup} (${reusedCount} reused, ${createdCount} created).`);
   }
 
   const action = {
@@ -827,6 +843,31 @@ async function createRuijieApiVouchers(item) {
   };
   Object.defineProperty(action, "vouchers", { value: vouchers, enumerable: false });
   return action;
+}
+
+async function listReusableRuijieVouchers({ session, groupId, profile, comment, limit }) {
+  const vouchers = [];
+  for (let start = 0; start < 2000 && vouchers.length < limit; start += 200) {
+    const result = await ruijieApiRequest(
+      `/service/api/intlSamVoucher/getList/${encodeURIComponent(session.tenantName)}/${encodeURIComponent(groupId)}`,
+      {
+        accessToken: session.accessToken,
+        params: { start, pageSize: 200, status: 1 },
+      },
+    );
+    if (result.voucherData?.code !== 0) {
+      throw new Error(`Ruijie voucher listing failed (voucher API code ${result.voucherData?.code ?? "unknown"}).`);
+    }
+    const records = result.voucherData?.list ?? [];
+    for (const voucher of records) {
+      const code = voucher.codeNo ?? voucher.voucherCode;
+      const sameGroup = voucher.userGroupId == null || String(voucher.userGroupId) === String(profile.userGroupId);
+      if (code && voucher.comment === comment && sameGroup) vouchers.push(code);
+      if (vouchers.length >= limit) break;
+    }
+    if (records.length < 200) break;
+  }
+  return [...new Set(vouchers)].slice(0, limit);
 }
 
 function walkObjects(value, visitor) {
