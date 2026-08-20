@@ -74,8 +74,8 @@ let ruijiePage = null;
 try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
 
-  await loginQikNet(qiknetPage);
-  const inventory = await readQikNetInventory(qiknetPage);
+  await withTimeout(loginQikNet(qiknetPage), 120_000, "QikNet sign-in");
+  const inventory = await withTimeout(readQikNetInventory(qiknetPage), 120_000, "QikNet inventory scan");
   report.inventory = inventory;
 
   const work = buildWorkList(inventory);
@@ -87,12 +87,12 @@ try {
     await qiknetPage.close();
     qiknetPage = null;
     ruijiePage = await context.newPage();
-    await loginRuijie(ruijiePage);
+    await withTimeout(loginRuijie(ruijiePage), 180_000, "Ruijie sign-in");
 
     if (dryRun) {
       for (const item of work) {
         try {
-          const action = await prepareRuijieExport(ruijiePage, item);
+          const action = await withTimeout(prepareRuijieExport(ruijiePage, item), 180_000, `Ruijie export ${item.qiknetGroup}`);
           action.status = "dry-run";
           report.actions.push(action);
           log(`[DRY RUN] ${item.branch.qiknetName} / ${item.qiknetGroup}: ${action.sourceCount} unused source voucher(s).`);
@@ -105,7 +105,7 @@ try {
       const exported = [];
       for (const item of work) {
         try {
-          const action = await prepareRuijieExport(ruijiePage, item);
+          const action = await withTimeout(prepareRuijieExport(ruijiePage, item), 180_000, `Ruijie export ${item.qiknetGroup}`);
           action.status = "exported";
           report.actions.push(action);
           exported.push({ item, action });
@@ -119,12 +119,12 @@ try {
 
       if (exported.length) {
         qiknetPage = await context.newPage();
-        await loginQikNet(qiknetPage);
+        await withTimeout(loginQikNet(qiknetPage), 120_000, "QikNet upload sign-in");
       }
 
       for (const { item, action } of exported) {
         try {
-          await uploadQikNetInventory(qiknetPage, item, action.filePath);
+          await withTimeout(uploadQikNetInventory(qiknetPage, item, action.filePath), 120_000, `QikNet upload ${item.qiknetGroup}`);
           action.status = "uploaded";
           log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
         } catch (error) {
@@ -135,7 +135,7 @@ try {
 
       if (report.actions.some((action) => action.status === "uploaded")) {
         await qiknetPage.waitForTimeout(1_000);
-        report.inventoryAfter = await readQikNetInventory(qiknetPage);
+        report.inventoryAfter = await withTimeout(readQikNetInventory(qiknetPage), 120_000, "QikNet post-upload inventory scan");
         verifyReplenishmentTargets(report.inventoryAfter);
       }
       report.status = report.errors.length ? "completed-with-errors" : "updated";
@@ -498,6 +498,23 @@ function formatError(error) {
 
 function splitRecipients(value) {
   return [...new Set(String(value).split(",").map((recipient) => recipient.trim()).filter(Boolean))];
+}
+
+async function withTimeout(promise, timeoutMs, label) {
+  let timeoutId;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(
+          () => reject(new Error(`${label} exceeded ${Math.round(timeoutMs / 1_000)} seconds.`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeoutId);
+  }
 }
 
 function recordItemError(item, error) {
