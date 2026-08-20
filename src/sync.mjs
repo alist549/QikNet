@@ -151,6 +151,9 @@ try {
   if (!dryRun) {
     const stockRecipients = splitRecipients(requiredEnv("STOCK_REPORT_RECIPIENT"));
     const refillMessages = buildBranchRefillMessages();
+    if (refillMessages.length === 0 && report.status === "healthy" && report.errors.length === 0) {
+      refillMessages.push({ branch: "All branches", message: "QikNet: All stock levels are OK." });
+    }
     for (const refill of refillMessages) {
       for (const recipient of stockRecipients) {
         try {
@@ -159,7 +162,9 @@ try {
             campaignUrl: config.sms.campaignUrl,
             senderId: config.sms.senderId,
             recipient,
-            campaignName: `QikNet Refill - ${refill.branch}`,
+            campaignName: refill.branch === "All branches"
+              ? "QikNet Stock Healthy"
+              : `QikNet Refill - ${refill.branch}`,
             message: refill.message,
           });
           report.sms.push({
