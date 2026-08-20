@@ -28,8 +28,7 @@ jobs:
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
       DEFAULT_OUTAGE_RECIPIENTS: ${{ secrets.DEFAULT_OUTAGE_RECIPIENTS }}
       SPECIAL_OUTAGE_RECIPIENT: ${{ secrets.SPECIAL_OUTAGE_RECIPIENT }}
-      # Keep scheduled alerts disabled until recipient routing is validated.
-      SEND_SMS: ${{ github.event_name == 'workflow_dispatch' && toJSON(inputs.send_sms) || 'false' }}
+      SEND_SMS: ${{ github.event_name == 'schedule' && 'true' || toJSON(inputs.send_sms) }}
       HEADLESS: "false"
       STATION_STATE_PATH: C:\qiknet-data\station-status.json
 
