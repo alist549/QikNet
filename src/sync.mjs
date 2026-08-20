@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { maskPhone, sendSmsCampaign } from "./sms.mjs";
@@ -526,7 +526,8 @@ async function uploadQikNetInventory(page, item, vouchers) {
 
   const textMode = page.getByRole("button", { name: "Text upload", exact: true });
   await textMode.waitFor({ state: "visible" });
-  await textMode.click();
+  await textMode.click({ force: true });
+  await page.waitForTimeout(500);
 
   const dialog = page.getByRole("dialog").last();
   const overlay = page.locator("div.fixed.inset-0.z-50").last();
@@ -547,22 +548,37 @@ async function uploadQikNetInventory(page, item, vouchers) {
     }
   }
 
-  const voucherText = scope.locator("textarea:visible").last();
-  if (!(await voucherText.isVisible().catch(() => false))) {
+  const voucherText = scope.locator('textarea:visible, [contenteditable="true"]:visible').last();
+  const textUploadButton = scope.getByRole("button", { name: /upload.*text.*voucher/i }).last();
+  const fileInput = scope.locator('input[type="file"]');
+  const acceptsTextFile = await textUploadButton.isVisible().catch(() => false)
+    || /text|txt|csv/i.test(await fileInput.getAttribute("accept").catch(() => "") ?? "");
+  let temporaryTextPath;
+  if (await voucherText.isVisible().catch(() => false)) {
+    await voucherText.fill(vouchers.join(","));
+  } else if (acceptsTextFile && await fileInput.count()) {
+    temporaryTextPath = path.join(DOWNLOAD_DIR, `qiknet-vouchers-${Date.now()}.txt`);
+    await writeFile(temporaryTextPath, vouchers.join(","), "utf8");
+    await fileInput.setInputFiles(temporaryTextPath);
+  } else {
     const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
-    throw new Error(`QikNet comma-delimited voucher field was not found. Visible buttons: ${controls.join(", ")}`);
+    const modeClass = await textMode.getAttribute("class").catch(() => "unknown");
+    throw new Error(`QikNet text-upload controls were not activated. Text button class: ${modeClass}. Visible buttons: ${controls.join(", ")}`);
   }
-  await voucherText.fill(vouchers.join(","));
 
   const uploadButton = scope
-    .getByRole("button", { name: /upload.*voucher|add.*voucher|save/i })
+    .getByRole("button", { name: /upload.*(text.*)?voucher|add.*voucher|save/i })
     .last();
   if (!(await uploadButton.isVisible().catch(() => false))) {
     const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
     throw new Error(`QikNet text voucher submit button was not found. Visible buttons: ${controls.join(", ")}`);
   }
-  await uploadButton.click();
-  await page.waitForTimeout(1_200);
+  try {
+    await uploadButton.click();
+    await page.waitForTimeout(1_200);
+  } finally {
+    if (temporaryTextPath) await unlink(temporaryTextPath).catch(() => {});
+  }
 
   const visibleText = await page.locator("body").innerText();
   if (/upload failed|could not upload|invalid file|error occurred/i.test(visibleText)) {
