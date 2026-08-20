@@ -150,20 +150,28 @@ try {
 
   if (!dryRun) {
     const stockRecipients = splitRecipients(requiredEnv("STOCK_REPORT_RECIPIENT"));
-    for (const recipient of stockRecipients) {
-      try {
-        await sendSmsCampaign({
-          token: process.env.SMSPOP_TOKEN,
-          campaignUrl: config.sms.campaignUrl,
-          senderId: config.sms.senderId,
-          recipient,
-          campaignName: "QikNet Daily Voucher Stock Report",
-          message: buildStockReportMessage(),
-        });
-        report.sms.push({ recipient: maskPhone(recipient), status: "sent" });
-      } catch (error) {
-        report.sms.push({ recipient: maskPhone(recipient), status: "failed", message: formatError(error) });
-        report.errors.push({ message: `Stock report SMS failed for ${maskPhone(recipient)}: ${formatError(error)}` });
+    const refillMessages = buildBranchRefillMessages();
+    for (const refill of refillMessages) {
+      for (const recipient of stockRecipients) {
+        try {
+          await sendSmsCampaign({
+            token: process.env.SMSPOP_TOKEN,
+            campaignUrl: config.sms.campaignUrl,
+            senderId: config.sms.senderId,
+            recipient,
+            campaignName: `QikNet Refill - ${refill.branch}`,
+            message: refill.message,
+          });
+          report.sms.push({
+            branch: refill.branch,
+            recipient: maskPhone(recipient),
+            messageLength: refill.message.length,
+            status: "sent",
+          });
+        } catch (error) {
+          report.sms.push({ branch: refill.branch, recipient: maskPhone(recipient), status: "failed", message: formatError(error) });
+          report.errors.push({ message: `Refill SMS failed for ${refill.branch} / ${maskPhone(recipient)}: ${formatError(error)}` });
+        }
       }
     }
   }
@@ -671,24 +679,30 @@ function verifyReplenishmentTargets(inventoryAfter) {
   }
 }
 
-function buildStockReportMessage() {
-  const uploaded = report.actions.filter((action) => action.status === "uploaded");
-  const verified = uploaded.filter((action) => Number.isFinite(action.qiknetAvailableAfter));
-  const belowTarget = verified.filter((action) => action.qiknetAvailableAfter < config.stockPolicy.target);
-  const checked = new Intl.DateTimeFormat("en-GB", {
-    timeZone: "Africa/Harare",
-    day: "2-digit",
-    month: "short",
-    hour: "2-digit",
-    minute: "2-digit",
-    hour12: false,
-  }).format(new Date());
-
-  if (uploaded.length === 0 && report.errors.length === 0) {
-    return `QikNet stock report: all monitored voucher groups are at or above ${config.stockPolicy.minimum}. Checked ${checked}.`;
+function buildBranchRefillMessages() {
+  const labels = {
+    "2 Hours Voucher": "2Hr",
+    "Daily Voucher": "Day",
+    "2 Days Voucher": "2Day",
+    "Weekly Voucher": "Week",
+    "Monthly Voucher": "Month",
+  };
+  const byBranch = new Map();
+  for (const action of report.actions) {
+    if (action.status !== "uploaded" || !Number.isFinite(action.qiknetAvailableAfter)) continue;
+    if (!byBranch.has(action.branch)) byBranch.set(action.branch, []);
+    byBranch.get(action.branch).push(action);
   }
 
-  return `QikNet stock report: ${uploaded.length} group(s) replenished; ${belowTarget.length} below target ${config.stockPolicy.target}; ${report.errors.length} error(s). Checked ${checked}.`;
+  return [...byBranch.entries()].map(([branch, actions]) => {
+    const changes = actions.map((action) =>
+      `${labels[action.voucherGroup] ?? action.voucherGroup} ${action.qiknetAvailableBefore}>${action.qiknetAvailableAfter}`);
+    const message = `QikNet refill - ${branch}: ${changes.join("; ")}.`;
+    if (message.length > 160) {
+      throw new Error(`Refill SMS for ${branch} exceeds 160 characters (${message.length}).`);
+    }
+    return { branch, message };
+  });
 }
 
 function requiredEnv(name) {
