@@ -456,28 +456,30 @@ async function collectRuijieVoucherCodes(page, panel, limit) {
   let previousPageSignature = "";
 
   for (let pageNumber = 1; pageNumber <= 30 && codes.size < limit; pageNumber += 1) {
-    const tables = panel.locator("table:visible");
-    let table;
-    for (let index = 0; index < await tables.count(); index += 1) {
-      const candidate = tables.nth(index);
-      if (await candidate.locator("tbody tr").count()) {
-        table = candidate;
-        break;
-      }
-    }
-    if (!table) throw new Error("Ruijie voucher table body was not found.");
-    await table.waitFor({ state: "visible", timeout: navigationTimeout });
-
-    // Element UI renders the header and body as separate sibling tables.
-    const headers = (await panel.locator("th:visible").allInnerTexts()).map((value) => value.trim());
+    // Element UI renders header/body as sibling tables. Extract both in one
+    // browser-side pass to avoid expensive Playwright locator enumeration.
+    const snapshot = await panel.evaluate((root) => {
+      const visible = (element) => Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+      const headers = [...root.querySelectorAll("th")]
+        .filter(visible)
+        .map((cell) => cell.textContent?.trim() ?? "");
+      const bodyTable = [...root.querySelectorAll("table")]
+        .filter(visible)
+        .find((candidate) => candidate.querySelector("tbody tr"));
+      const rows = bodyTable
+        ? [...bodyTable.querySelectorAll("tbody tr")].map((row) => [...row.querySelectorAll("td")]
+          .map((cell) => cell.textContent?.trim() ?? ""))
+        : [];
+      return { headers, rows };
+    });
+    if (!snapshot.rows.length) throw new Error("Ruijie voucher table body was not found.");
+    const headers = snapshot.headers;
     const codeColumn = headers.findIndex((value) => /voucher\s*(code|number)|^code$/i.test(value));
     if (codeColumn < 0) {
       throw new Error(`Ruijie voucher-code column was not found. Table columns: ${headers.join(", ")}`);
     }
 
-    const pageCodes = await table.locator("tbody tr").evaluateAll((rows, columnIndex) => rows
-      .map((row) => row.querySelectorAll("td")[columnIndex]?.textContent?.trim() ?? "")
-      .filter(Boolean), codeColumn);
+    const pageCodes = snapshot.rows.map((row) => row[codeColumn] ?? "").filter(Boolean);
     const signature = pageCodes.join("|");
     if (pageNumber > 1 && signature === previousPageSignature) break;
     previousPageSignature = signature;
@@ -489,9 +491,12 @@ async function collectRuijieVoucherCodes(page, panel, limit) {
     if (codes.size >= limit) break;
 
     const antNext = panel.locator("li.ant-pagination-next:visible").last();
+    const elementNext = panel.locator(".el-pagination .btn-next:visible").last();
     const nextButton = (await antNext.isVisible().catch(() => false))
       ? antNext.locator("button, a").first()
-      : panel.getByRole("button", { name: /next/i }).locator(":visible").last();
+      : (await elementNext.isVisible().catch(() => false))
+        ? elementNext
+        : panel.getByRole("button", { name: /next/i }).locator(":visible").last();
     if (!(await nextButton.isVisible().catch(() => false))) break;
     const disabled = await nextButton.isDisabled().catch(() => false)
       || (await antNext.getAttribute("class").catch(() => "") ?? "").includes("disabled");
