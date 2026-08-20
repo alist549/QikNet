@@ -321,11 +321,18 @@ async function prepareRuijieExport(page, item) {
 
   await dismissRuijieReleaseOverlay(page);
   const projectsPage = page;
-  const projectPagePromise = page.context().waitForEvent("page", { timeout: 5_000 }).catch(() => null);
+  const projectUrl = /#\/monitor_project_workbarn_menu/;
+  const samePageNavigation = page
+    .waitForURL(projectUrl, { timeout: navigationTimeout })
+    .then(() => page);
+  const popupNavigation = page.context()
+    .waitForEvent("page", { timeout: navigationTimeout })
+    .then(async (popup) => {
+      await popup.waitForURL(projectUrl, { timeout: navigationTimeout });
+      return popup;
+    });
   await projectRow.getByRole("img", { name: "Go to this project" }).click({ force: true });
-  const openedProjectPage = await projectPagePromise;
-  if (openedProjectPage) page = openedProjectPage;
-  await page.waitForURL(/#\/monitor_project_workbarn_menu/, { timeout: navigationTimeout });
+  page = await Promise.any([samePageNavigation, popupNavigation]);
 
   await page.getByText("Auth & Accounts", { exact: true }).click();
   await page.getByRole("link", { name: "User Management", exact: true }).click();
@@ -333,7 +340,7 @@ async function prepareRuijieExport(page, item) {
   await page.getByRole("tab", { name: "Voucher", exact: true }).click();
 
   const panel = page.getByRole("tabpanel", { name: "Voucher" });
-  const search = panel.getByPlaceholder("Voucher/User group");
+  const search = panel.locator('input[placeholder="Voucher/User group"]:visible').last();
   await search.fill(item.ruijieGroup);
   await search.press("Enter");
 
