@@ -240,6 +240,7 @@ async function loginRuijie(page) {
 async function readQikNetInventory(page) {
   log("Reading QikNet branch inventory.");
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
+  await dismissQikNetUploadModal(page);
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
   await page.getByText(/available vouchers/i).first().waitFor({ state: "visible", timeout: navigationTimeout });
 
@@ -514,10 +515,7 @@ async function collectRuijieVoucherCodes(page, panel, limit) {
 
 async function uploadQikNetInventory(page, item, vouchers) {
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
-  // A hash-only navigation can leave a failed upload modal mounted.
-  if (await page.locator("div.fixed.inset-0.z-50").last().isVisible().catch(() => false)) {
-    await page.reload({ waitUntil: "domcontentloaded" });
-  }
+  await dismissQikNetUploadModal(page);
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
   const card = await findQikNetBranchCardWithRetry(page, item.branch.qiknetName);
 
@@ -579,6 +577,23 @@ async function uploadQikNetInventory(page, item, vouchers) {
   const visibleText = await page.locator("body").innerText();
   if (/upload failed|could not upload|invalid file|error occurred/i.test(visibleText)) {
     throw new Error("QikNet reported a text voucher upload error.");
+  }
+  await dismissQikNetUploadModal(page);
+}
+
+async function dismissQikNetUploadModal(page) {
+  const overlay = page.locator("div.fixed.inset-0.z-50").last();
+  if (!(await overlay.isVisible().catch(() => false))) return;
+
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.waitForTimeout(250);
+  if (await overlay.isVisible().catch(() => false)) {
+    const closeButton = overlay.locator("button").first();
+    if (await closeButton.isVisible().catch(() => false)) await closeButton.click({ force: true });
+  }
+  const closed = await overlay.waitFor({ state: "hidden", timeout: 3_000 }).then(() => true).catch(() => false);
+  if (!closed) {
+    await page.reload({ waitUntil: "domcontentloaded" });
   }
 }
 
