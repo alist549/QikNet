@@ -530,18 +530,19 @@ async function uploadQikNetInventory(page, item, vouchers) {
   const card = await findQikNetBranchCardWithRetry(page, item.branch.qiknetName);
 
   await card.getByRole("button", { name: "Add inventory", exact: true }).click();
-  await page.getByRole("heading", { name: item.branch.qiknetName, exact: true }).waitFor({ state: "visible" });
+  const dialog = page.getByRole("dialog").last();
+  const overlay = page.locator("div.fixed.inset-0.z-50").last();
+  await overlay.waitFor({ state: "visible" });
+  const scope = await dialog.isVisible().catch(() => false)
+    ? dialog
+    : await overlay.isVisible().catch(() => false) ? overlay : page;
+  await scope.getByRole("heading", { name: item.branch.qiknetName, exact: true }).waitFor({ state: "visible" });
 
-  const textMode = page.getByRole("button", { name: "Text upload", exact: true });
+  const textMode = scope.getByRole("button", { name: "Text upload", exact: true });
   await textMode.waitFor({ state: "visible" });
   await textMode.click({ force: true });
   await page.waitForTimeout(500);
 
-  const dialog = page.getByRole("dialog").last();
-  const overlay = page.locator("div.fixed.inset-0.z-50").last();
-  const scope = await dialog.isVisible().catch(() => false)
-    ? dialog
-    : await overlay.isVisible().catch(() => false) ? overlay : page;
   const labelledGroupSelect = scope.getByLabel(/voucher.*group|profile|category/i).first();
   const groupSelect = await labelledGroupSelect.isVisible().catch(() => false)
     ? labelledGroupSelect
@@ -573,13 +574,21 @@ async function uploadQikNetInventory(page, item, vouchers) {
   const uploadButton = scope
     .getByRole("button", { name: /upload.*(text.*)?voucher|add.*voucher|save/i })
     .last();
-  if (!(await uploadButton.isVisible().catch(() => false))) {
+  const uploadingButton = scope.getByRole("button", { name: /uploading/i }).last();
+  const uploadAlreadyStarted = await uploadingButton.isVisible().catch(() => false);
+  if (!uploadAlreadyStarted && !(await uploadButton.isVisible().catch(() => false))) {
     const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
     throw new Error(`QikNet text voucher submit button was not found. Visible buttons: ${controls.join(", ")}`);
   }
   try {
-    await uploadButton.click();
-    await page.waitForTimeout(1_200);
+    if (!uploadAlreadyStarted) await uploadButton.click();
+    const uploadStarted = await uploadingButton.waitFor({ state: "visible", timeout: 5_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (uploadStarted) {
+      await uploadingButton.waitFor({ state: "hidden", timeout: 90_000 });
+    }
+    await page.waitForTimeout(1_500);
   } finally {
     if (temporaryTextPath) await unlink(temporaryTextPath).catch(() => {});
   }
