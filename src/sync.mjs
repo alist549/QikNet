@@ -353,7 +353,7 @@ async function prepareRuijieExport(page, item) {
         break;
       }
     }
-    if (!openedProjectPage) await page.waitForTimeout(500);
+    if (!openedProjectPage) await new Promise((resolve) => setTimeout(resolve, 500));
   }
 
   if (!openedProjectPage) {
@@ -361,17 +361,43 @@ async function prepareRuijieExport(page, item) {
     throw new Error(`Ruijie project menu did not become visible. Open pages: ${visibleUrls}`);
   }
   page = openedProjectPage;
+  log(`Ruijie project menu opened for ${item.qiknetGroup}.`);
 
-  await page.getByText("Auth & Accounts", { exact: true }).click();
-  await page.getByRole("link", { name: "User Management", exact: true }).click({ noWaitAfter: true });
+  await dismissRuijieReleaseOverlay(page);
+  await page.getByText("Auth & Accounts", { exact: true }).click({ force: true });
+  await page.getByRole("link", { name: "User Management", exact: true }).click({
+    force: true,
+    noWaitAfter: true,
+  });
+
+  const voucherDeadline = Date.now() + navigationTimeout;
+  let voucherPage = null;
+  while (!voucherPage && Date.now() < voucherDeadline) {
+    const candidates = [...page.context().pages()].reverse();
+    for (const candidate of candidates) {
+      const candidateTab = candidate.getByRole("tab", { name: "Voucher", exact: true });
+      if (await candidateTab.isVisible().catch(() => false)) {
+        voucherPage = candidate;
+        break;
+      }
+    }
+    if (!voucherPage) await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+
+  if (!voucherPage) {
+    const visibleUrls = page.context().pages().map((candidate) => candidate.url()).join(", ");
+    throw new Error(`Ruijie Voucher tab did not become visible. Open pages: ${visibleUrls}`);
+  }
+  page = voucherPage;
   const voucherTab = page.getByRole("tab", { name: "Voucher", exact: true });
-  await voucherTab.waitFor({ state: "visible", timeout: navigationTimeout });
   await voucherTab.click();
+  log(`Ruijie Voucher tab opened for ${item.qiknetGroup}.`);
 
   const panel = page.getByRole("tabpanel", { name: "Voucher" });
   const search = panel.locator('input[placeholder="Voucher/User group"]:visible').last();
   await search.fill(item.ruijieGroup);
   await search.press("Enter");
+  log(`Ruijie voucher group selected for ${item.qiknetGroup}.`);
 
   await panel.getByRole("button", { name: "filter" }).click();
   await page.getByRole("menuitem", { name: "Not used", exact: true }).click();
@@ -381,6 +407,7 @@ async function prepareRuijieExport(page, item) {
   const countText = await panel.locator("li").filter({ hasText: "in total" }).innerText();
   const sourceCount = Number(countText.match(/(\d+)\s+in total/i)?.[1] ?? 0);
   if (!sourceCount) throw new Error("Ruijie returned no unused vouchers for this group.");
+  log(`Ruijie reported ${sourceCount} unused voucher(s) for ${item.qiknetGroup}.`);
 
   const fileName = `${slug(item.branch.qiknetName)}-${slug(item.qiknetGroup)}-${Date.now()}.xlsx`;
   const filePath = path.join(DOWNLOAD_DIR, fileName);
