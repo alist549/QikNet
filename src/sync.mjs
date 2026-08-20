@@ -29,6 +29,9 @@ const credentials = {
   ruijieApiSecret: requiredEnv("RUIJIE_API_SECRET"),
 };
 const ruijieApiBaseUrl = String(process.env.RUIJIE_API_BASE_URL || "https://cloud-eu.ruijienetworks.com").replace(/\/$/, "");
+let ruijieSessionPromise;
+const ruijieGroupCache = new Map();
+const ruijieProfileCache = new Map();
 
 const report = {
   startedAt: new Date().toISOString(),
@@ -702,10 +705,6 @@ async function createPortalContext(browserInstance) {
 async function exportRuijieItem(item) {
   return createRuijieApiVouchers(item);
 }
-
-let ruijieSessionPromise;
-const ruijieGroupCache = new Map();
-const ruijieProfileCache = new Map();
 
 async function getRuijieSession() {
   if (!ruijieSessionPromise) {
