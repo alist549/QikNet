@@ -699,6 +699,8 @@ function buildBranchRefillMessages() {
   const byBranch = new Map();
   for (const action of report.actions) {
     if (action.status !== "uploaded" || !Number.isFinite(action.qiknetAvailableAfter)) continue;
+    if (action.qiknetAvailableAfter <= action.qiknetAvailableBefore
+      || action.qiknetAvailableAfter < config.stockPolicy.target) continue;
     if (!byBranch.has(action.branch)) byBranch.set(action.branch, []);
     byBranch.get(action.branch).push(action);
   }
