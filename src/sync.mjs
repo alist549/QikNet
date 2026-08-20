@@ -335,25 +335,28 @@ async function prepareRuijieExport(page, item) {
     throw new Error(`Expected one Ruijie project named '${item.branch.ruijieProject}', found ${await projectRow.count()}.`);
   }
 
-  await dismissRuijieReleaseOverlay(page);
   const projectsPage = page;
-  await projectRow.getByRole("img", { name: "Go to this project" }).click({
-    force: true,
-    noWaitAfter: true,
-  });
-
-  const projectDeadline = Date.now() + navigationTimeout;
   let openedProjectPage = null;
-  while (!openedProjectPage && Date.now() < projectDeadline) {
-    const candidates = [...page.context().pages()].reverse();
-    for (const candidate of candidates) {
-      const projectMenu = candidate.getByText("Auth & Accounts", { exact: true });
-      if (await projectMenu.isVisible().catch(() => false)) {
-        openedProjectPage = candidate;
-        break;
+  for (let attempt = 1; attempt <= 3 && !openedProjectPage; attempt += 1) {
+    await dismissRuijieReleaseOverlay(page);
+    await projectRow.getByRole("img", { name: "Go to this project" }).click({
+      force: true,
+      noWaitAfter: true,
+    });
+
+    const attemptDeadline = Date.now() + 15_000;
+    while (!openedProjectPage && Date.now() < attemptDeadline) {
+      const candidates = [...page.context().pages()].reverse();
+      for (const candidate of candidates) {
+        const projectMenu = candidate.getByText("Auth & Accounts", { exact: true });
+        if (await projectMenu.isVisible().catch(() => false)) {
+          openedProjectPage = candidate;
+          break;
+        }
       }
+      if (!openedProjectPage) await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    if (!openedProjectPage) await new Promise((resolve) => setTimeout(resolve, 500));
+    if (!openedProjectPage) log(`Ruijie project click did not open ${item.qiknetGroup} (attempt ${attempt}/3).`);
   }
 
   if (!openedProjectPage) {
@@ -364,8 +367,19 @@ async function prepareRuijieExport(page, item) {
   log(`Ruijie project menu opened for ${item.qiknetGroup}.`);
 
   await dismissRuijieReleaseOverlay(page);
-  await page.getByText("Auth & Accounts", { exact: true }).click({ force: true });
-  await page.getByRole("link", { name: "User Management", exact: true }).click({
+  const authMenu = page.getByText("Auth & Accounts", { exact: true });
+  const userManagement = page.getByRole("link", { name: "User Management", exact: true });
+  let userManagementVisible = false;
+  for (let attempt = 1; attempt <= 3 && !userManagementVisible; attempt += 1) {
+    await authMenu.click({ force: true });
+    userManagementVisible = await userManagement
+      .waitFor({ state: "visible", timeout: 10_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!userManagementVisible) log(`Ruijie Auth menu did not expand (attempt ${attempt}/3).`);
+  }
+  if (!userManagementVisible) throw new Error("Ruijie User Management menu did not become visible.");
+  await userManagement.click({
     force: true,
     noWaitAfter: true,
   });
