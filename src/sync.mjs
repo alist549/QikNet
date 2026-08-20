@@ -404,7 +404,7 @@ async function prepareRuijieExport(page, item) {
   await page.getByRole("button", { name: "OK", exact: true }).click();
   await page.waitForTimeout(700);
 
-  const countText = await panel.locator("li").filter({ hasText: "in total" }).innerText();
+  const countText = await panel.getByText(/\d+\s+in total/i).last().innerText();
   const sourceCount = Number(countText.match(/(\d+)\s+in total/i)?.[1] ?? 0);
   if (!sourceCount) throw new Error("Ruijie returned no unused vouchers for this group.");
   log(`Ruijie reported ${sourceCount} unused voucher(s) for ${item.qiknetGroup}.`);
@@ -595,7 +595,11 @@ async function exportRuijieItem(item) {
       `Ruijie export ${item.qiknetGroup}`,
     );
   } finally {
-    await exportContext.close().catch(() => {});
+    try {
+      await withTimeout(exportContext.close(), 15_000, `Ruijie cleanup for ${item.qiknetGroup}`);
+    } catch (error) {
+      log(`WARNING: ${formatError(error)}`);
+    }
   }
 }
 
