@@ -117,7 +117,7 @@ try {
 
       for (const { item, action } of exported) {
         try {
-          await withTimeout(uploadQikNetInventory(qiknetPage, item, action.filePath), 120_000, `QikNet upload ${item.qiknetGroup}`);
+          await withTimeout(uploadQikNetInventory(qiknetPage, item, action.vouchers), 120_000, `QikNet upload ${item.qiknetGroup}`);
           action.status = "uploaded";
           log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
         } catch (error) {
@@ -423,12 +423,12 @@ async function prepareRuijieExport(page, item) {
   if (!sourceCount) throw new Error("Ruijie returned no unused vouchers for this group.");
   log(`Ruijie reported ${sourceCount} unused voucher(s) for ${item.qiknetGroup}.`);
 
-  const fileName = `${slug(item.branch.qiknetName)}-${slug(item.qiknetGroup)}-${Date.now()}.xlsx`;
-  const filePath = path.join(DOWNLOAD_DIR, fileName);
-  const downloadPromise = page.waitForEvent("download", { timeout: navigationTimeout });
-  await panel.getByRole("button", { name: "Export", exact: true }).click();
-  const download = await downloadPromise;
-  await download.saveAs(filePath);
+  const requestedCount = item.qiknetAvailable < config.stockPolicy.criticalBelow
+    ? config.stockPolicy.criticalBatchSize
+    : config.stockPolicy.batchSize;
+  const vouchers = await collectRuijieVoucherCodes(page, panel, Math.min(requestedCount, sourceCount));
+  if (!vouchers.length) throw new Error("No unused voucher codes could be read from the Ruijie table.");
+  log(`Collected ${vouchers.length} Ruijie voucher code(s) for ${item.qiknetGroup}.`);
 
   const action = {
     branch: item.branch.qiknetName,
@@ -440,14 +440,59 @@ async function prepareRuijieExport(page, item) {
     qiknetStatusBefore: item.qiknetStatus,
     target: item.target,
     sourceCount,
-    filePath,
+    requestedCount,
+    voucherCount: vouchers.length,
     status: "exported",
   };
+  // Voucher codes are bearer credentials. Keep them available in memory for the
+  // upload, but make sure JSON.stringify(report) cannot persist them.
+  Object.defineProperty(action, "vouchers", { value: vouchers, enumerable: false });
   if (page !== projectsPage) await page.close().catch(() => {});
   return action;
 }
 
-async function uploadQikNetInventory(page, item, filePath) {
+async function collectRuijieVoucherCodes(page, panel, limit) {
+  const codes = new Set();
+  let previousPageSignature = "";
+
+  for (let pageNumber = 1; pageNumber <= 30 && codes.size < limit; pageNumber += 1) {
+    const table = panel.locator("table:visible").last();
+    await table.waitFor({ state: "visible", timeout: navigationTimeout });
+    const headers = (await table.locator("thead th").allInnerTexts()).map((value) => value.trim());
+    const codeColumn = headers.findIndex((value) => /voucher\s*(code|number)|^code$/i.test(value));
+    if (codeColumn < 0) {
+      throw new Error(`Ruijie voucher-code column was not found. Table columns: ${headers.join(", ")}`);
+    }
+
+    const pageCodes = await table.locator("tbody tr").evaluateAll((rows, columnIndex) => rows
+      .map((row) => row.querySelectorAll("td")[columnIndex]?.textContent?.trim() ?? "")
+      .filter(Boolean), codeColumn);
+    const signature = pageCodes.join("|");
+    if (pageNumber > 1 && signature === previousPageSignature) break;
+    previousPageSignature = signature;
+
+    for (const code of pageCodes) {
+      if (/^[A-Za-z0-9_-]{4,64}$/.test(code)) codes.add(code);
+      if (codes.size >= limit) break;
+    }
+    if (codes.size >= limit) break;
+
+    const antNext = panel.locator("li.ant-pagination-next:visible").last();
+    const nextButton = (await antNext.isVisible().catch(() => false))
+      ? antNext.locator("button, a").first()
+      : panel.getByRole("button", { name: /next/i }).locator(":visible").last();
+    if (!(await nextButton.isVisible().catch(() => false))) break;
+    const disabled = await nextButton.isDisabled().catch(() => false)
+      || (await antNext.getAttribute("class").catch(() => "") ?? "").includes("disabled");
+    if (disabled) break;
+    await nextButton.click();
+    await page.waitForTimeout(700);
+  }
+
+  return [...codes].slice(0, limit);
+}
+
+async function uploadQikNetInventory(page, item, vouchers) {
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
   const card = await findQikNetBranchCard(page, item.branch.qiknetName);
@@ -455,25 +500,46 @@ async function uploadQikNetInventory(page, item, filePath) {
   await card.getByRole("button", { name: "Add inventory", exact: true }).click();
   await page.getByRole("heading", { name: item.branch.qiknetName, exact: true }).waitFor({ state: "visible" });
 
-  const excelTab = page.getByRole("button", { name: "Excel upload", exact: true });
-  if (await excelTab.isVisible().catch(() => false)) await excelTab.click();
+  const textMode = page.getByRole("button", { name: /text|manual|comma/i }).locator(":visible").first();
+  if (await textMode.isVisible().catch(() => false)) await textMode.click();
 
-  const fileInput = page.locator('input[type="file"]');
-  if (await fileInput.count()) {
-    await fileInput.setInputFiles(filePath);
-  } else {
-    const chooserPromise = page.waitForEvent("filechooser");
-    await page.getByRole("button", { name: "Choose File", exact: true }).click();
-    const chooser = await chooserPromise;
-    await chooser.setFiles(filePath);
+  const dialog = page.getByRole("dialog").locator(":visible").last();
+  const scope = await dialog.isVisible().catch(() => false) ? dialog : page;
+  const labelledGroupSelect = scope.getByLabel(/voucher.*group|profile|category/i).locator(":visible").first();
+  const groupSelect = await labelledGroupSelect.isVisible().catch(() => false)
+    ? labelledGroupSelect
+    : scope.getByRole("combobox").locator(":visible").first();
+  if (await groupSelect.isVisible().catch(() => false)) {
+    await groupSelect.click();
+    const groupOption = page.getByRole("option", { name: item.qiknetGroup, exact: true });
+    if (await groupOption.isVisible().catch(() => false)) {
+      await groupOption.click();
+    } else {
+      await page.getByText(item.qiknetGroup, { exact: true }).locator(":visible").last().click();
+    }
   }
 
-  await page.getByRole("button", { name: "Upload Excel vouchers", exact: true }).click();
+  const voucherText = scope.locator("textarea:visible").last();
+  if (!(await voucherText.isVisible().catch(() => false))) {
+    const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
+    throw new Error(`QikNet comma-delimited voucher field was not found. Visible buttons: ${controls.join(", ")}`);
+  }
+  await voucherText.fill(vouchers.join(","));
+
+  const uploadButton = scope
+    .getByRole("button", { name: /upload.*voucher|add.*voucher|save/i })
+    .locator(":visible")
+    .last();
+  if (!(await uploadButton.isVisible().catch(() => false))) {
+    const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
+    throw new Error(`QikNet text voucher submit button was not found. Visible buttons: ${controls.join(", ")}`);
+  }
+  await uploadButton.click();
   await page.waitForTimeout(1_200);
 
   const visibleText = await page.locator("body").innerText();
   if (/upload failed|could not upload|invalid file|error occurred/i.test(visibleText)) {
-    throw new Error("QikNet reported an Excel upload error.");
+    throw new Error("QikNet reported a text voucher upload error.");
   }
 }
 
