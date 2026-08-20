@@ -1,5 +1,5 @@
 import { chromium } from "playwright";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
 import { maskPhone, sendSmsCampaign } from "./sms.mjs";
@@ -25,9 +25,13 @@ const selectedBranches = new Set(
 const credentials = {
   qiknetEmail: requiredEnv("QIKNET_EMAIL"),
   qiknetPassword: requiredEnv("QIKNET_PASSWORD"),
-  ruijieEmail: requiredEnv("RUIJIE_EMAIL"),
-  ruijiePassword: requiredEnv("RUIJIE_PASSWORD"),
+  ruijieApiAppId: requiredEnv("RUIJIE_API_APP_ID"),
+  ruijieApiSecret: requiredEnv("RUIJIE_API_SECRET"),
 };
+const ruijieApiBaseUrl = String(process.env.RUIJIE_API_BASE_URL || "https://cloud-eu.ruijienetworks.com").replace(/\/$/, "");
+let ruijieSessionPromise;
+const ruijieGroupCache = new Map();
+const ruijieProfileCache = new Map();
 
 const report = {
   startedAt: new Date().toISOString(),
@@ -90,7 +94,7 @@ try {
           const action = await exportRuijieItem(item);
           action.status = "dry-run";
           report.actions.push(action);
-          log(`[DRY RUN] ${item.branch.qiknetName} / ${item.qiknetGroup}: ${action.sourceCount} unused source voucher(s).`);
+          log(`[DRY RUN] ${item.branch.qiknetName} / ${item.qiknetGroup}: would create ${action.requestedCount} voucher(s).`);
         } catch (error) {
           recordItemError(item, error);
         }
@@ -117,7 +121,7 @@ try {
 
       for (const { item, action } of exported) {
         try {
-          await withTimeout(uploadQikNetInventory(qiknetPage, item, action.filePath), 120_000, `QikNet upload ${item.qiknetGroup}`);
+          await withTimeout(uploadQikNetInventory(qiknetPage, item, action.vouchers), 120_000, `QikNet upload ${item.qiknetGroup}`);
           action.status = "uploaded";
           log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
         } catch (error) {
@@ -127,7 +131,9 @@ try {
       }
 
       if (report.actions.some((action) => action.status === "uploaded")) {
-        await qiknetPage.waitForTimeout(1_000);
+        // QikNet accepts the text upload immediately but updates inventory
+        // asynchronously; Unit M consistently settled within this window.
+        await qiknetPage.waitForTimeout(30_000);
         report.inventoryAfter = await readQikNetInventoryWithRetry(qiknetPage, "QikNet post-upload inventory scan");
         verifyReplenishmentTargets(report.inventoryAfter);
       }
@@ -236,6 +242,7 @@ async function loginRuijie(page) {
 async function readQikNetInventory(page) {
   log("Reading QikNet branch inventory.");
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
+  await dismissQikNetUploadModal(page);
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
   await page.getByText(/available vouchers/i).first().waitFor({ state: "visible", timeout: navigationTimeout });
 
@@ -423,12 +430,12 @@ async function prepareRuijieExport(page, item) {
   if (!sourceCount) throw new Error("Ruijie returned no unused vouchers for this group.");
   log(`Ruijie reported ${sourceCount} unused voucher(s) for ${item.qiknetGroup}.`);
 
-  const fileName = `${slug(item.branch.qiknetName)}-${slug(item.qiknetGroup)}-${Date.now()}.xlsx`;
-  const filePath = path.join(DOWNLOAD_DIR, fileName);
-  const downloadPromise = page.waitForEvent("download", { timeout: navigationTimeout });
-  await panel.getByRole("button", { name: "Export", exact: true }).click();
-  const download = await downloadPromise;
-  await download.saveAs(filePath);
+  const requestedCount = item.qiknetAvailable < config.stockPolicy.criticalBelow
+    ? config.stockPolicy.criticalBatchSize
+    : config.stockPolicy.batchSize;
+  const vouchers = await collectRuijieVoucherCodes(page, panel, Math.min(requestedCount, sourceCount));
+  if (!vouchers.length) throw new Error("No unused voucher codes could be read from the Ruijie table.");
+  log(`Collected ${vouchers.length} Ruijie voucher code(s) for ${item.qiknetGroup}.`);
 
   const action = {
     branch: item.branch.qiknetName,
@@ -440,44 +447,161 @@ async function prepareRuijieExport(page, item) {
     qiknetStatusBefore: item.qiknetStatus,
     target: item.target,
     sourceCount,
-    filePath,
+    requestedCount,
+    voucherCount: vouchers.length,
     status: "exported",
   };
+  // Voucher codes are bearer credentials. Keep them available in memory for the
+  // upload, but make sure JSON.stringify(report) cannot persist them.
+  Object.defineProperty(action, "vouchers", { value: vouchers, enumerable: false });
   if (page !== projectsPage) await page.close().catch(() => {});
   return action;
 }
 
-async function uploadQikNetInventory(page, item, filePath) {
+async function collectRuijieVoucherCodes(page, panel, limit) {
+  const codes = new Set();
+  let previousPageSignature = "";
+
+  for (let pageNumber = 1; pageNumber <= 30 && codes.size < limit; pageNumber += 1) {
+    // Element UI renders header/body as sibling tables. Extract both in one
+    // browser-side pass to avoid expensive Playwright locator enumeration.
+    const snapshot = await panel.evaluate((root) => {
+      const visible = (element) => Boolean(element.offsetWidth || element.offsetHeight || element.getClientRects().length);
+      const headers = [...root.querySelectorAll("th")]
+        .filter(visible)
+        .map((cell) => cell.textContent?.trim() ?? "");
+      const bodyTable = [...root.querySelectorAll("table")]
+        .filter(visible)
+        .find((candidate) => candidate.querySelector("tbody tr"));
+      const rows = bodyTable
+        ? [...bodyTable.querySelectorAll("tbody tr")].map((row) => [...row.querySelectorAll("td")]
+          .map((cell) => cell.textContent?.trim() ?? ""))
+        : [];
+      return { headers, rows };
+    });
+    if (!snapshot.rows.length) throw new Error("Ruijie voucher table body was not found.");
+    const headers = snapshot.headers;
+    const codeColumn = headers.findIndex((value) => /voucher\s*(code|number)|^code$/i.test(value));
+    if (codeColumn < 0) {
+      throw new Error(`Ruijie voucher-code column was not found. Table columns: ${headers.join(", ")}`);
+    }
+
+    const pageCodes = snapshot.rows.map((row) => row[codeColumn] ?? "").filter(Boolean);
+    const signature = pageCodes.join("|");
+    if (pageNumber > 1 && signature === previousPageSignature) break;
+    previousPageSignature = signature;
+
+    for (const code of pageCodes) {
+      if (/^[A-Za-z0-9_-]{4,64}$/.test(code)) codes.add(code);
+      if (codes.size >= limit) break;
+    }
+    if (codes.size >= limit) break;
+
+    const antNext = panel.locator("li.ant-pagination-next:visible").last();
+    const elementNext = panel.locator(".el-pagination .btn-next:visible").last();
+    const nextButton = (await antNext.isVisible().catch(() => false))
+      ? antNext.locator("button, a").first()
+      : (await elementNext.isVisible().catch(() => false))
+        ? elementNext
+        : panel.getByRole("button", { name: /next/i }).locator(":visible").last();
+    if (!(await nextButton.isVisible().catch(() => false))) break;
+    const disabled = await nextButton.isDisabled().catch(() => false)
+      || (await antNext.getAttribute("class").catch(() => "") ?? "").includes("disabled");
+    if (disabled) break;
+    await nextButton.click();
+    await page.waitForTimeout(700);
+  }
+
+  return [...codes].slice(0, limit);
+}
+
+async function uploadQikNetInventory(page, item, vouchers) {
   await page.goto(config.qiknet.inventoryUrl, { waitUntil: "domcontentloaded" });
+  await dismissQikNetUploadModal(page);
   await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
-  const card = await findQikNetBranchCard(page, item.branch.qiknetName);
+  const card = await findQikNetBranchCardWithRetry(page, item.branch.qiknetName);
 
   await card.getByRole("button", { name: "Add inventory", exact: true }).click();
   await page.getByRole("heading", { name: item.branch.qiknetName, exact: true }).waitFor({ state: "visible" });
 
-  const excelTab = page.getByRole("button", { name: "Excel upload", exact: true });
-  if (await excelTab.isVisible().catch(() => false)) await excelTab.click();
+  const textMode = page.getByRole("button", { name: "Text upload", exact: true });
+  await textMode.waitFor({ state: "visible" });
+  await textMode.click({ force: true });
+  await page.waitForTimeout(500);
 
-  const fileInput = page.locator('input[type="file"]');
-  if (await fileInput.count()) {
-    await fileInput.setInputFiles(filePath);
+  const dialog = page.getByRole("dialog").last();
+  const overlay = page.locator("div.fixed.inset-0.z-50").last();
+  const scope = await dialog.isVisible().catch(() => false)
+    ? dialog
+    : await overlay.isVisible().catch(() => false) ? overlay : page;
+  const labelledGroupSelect = scope.getByLabel(/voucher.*group|profile|category/i).first();
+  const groupSelect = await labelledGroupSelect.isVisible().catch(() => false)
+    ? labelledGroupSelect
+    : scope.getByRole("combobox").first();
+  if (await groupSelect.isVisible().catch(() => false)) {
+    await groupSelect.selectOption({ label: item.qiknetGroup });
   } else {
-    const chooserPromise = page.waitForEvent("filechooser");
-    await page.getByRole("button", { name: "Choose File", exact: true }).click();
-    const chooser = await chooserPromise;
-    await chooser.setFiles(filePath);
+    throw new Error("QikNet voucher-group selector was not found in the text-upload form.");
   }
 
-  await page.getByRole("button", { name: "Upload Excel vouchers", exact: true }).click();
-  await page.waitForTimeout(1_200);
+  const voucherText = scope.locator('textarea:visible, [contenteditable="true"]:visible').last();
+  const textUploadButton = scope.getByRole("button", { name: /upload.*text.*voucher/i }).last();
+  const fileInput = scope.locator('input[type="file"]');
+  const acceptsTextFile = await textUploadButton.isVisible().catch(() => false)
+    || /text|txt|csv/i.test(await fileInput.getAttribute("accept").catch(() => "") ?? "");
+  let temporaryTextPath;
+  if (await voucherText.isVisible().catch(() => false)) {
+    await voucherText.fill(vouchers.join(","));
+  } else if (acceptsTextFile && await fileInput.count()) {
+    temporaryTextPath = path.join(DOWNLOAD_DIR, `qiknet-vouchers-${Date.now()}.txt`);
+    await writeFile(temporaryTextPath, vouchers.join(","), "utf8");
+    await fileInput.setInputFiles(temporaryTextPath);
+  } else {
+    const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
+    const modeClass = await textMode.getAttribute("class").catch(() => "unknown");
+    throw new Error(`QikNet text-upload controls were not activated. Text button class: ${modeClass}. Visible buttons: ${controls.join(", ")}`);
+  }
+
+  const uploadButton = scope
+    .getByRole("button", { name: /upload.*(text.*)?voucher|add.*voucher|save/i })
+    .last();
+  if (!(await uploadButton.isVisible().catch(() => false))) {
+    const controls = await scope.getByRole("button").allInnerTexts().catch(() => []);
+    throw new Error(`QikNet text voucher submit button was not found. Visible buttons: ${controls.join(", ")}`);
+  }
+  try {
+    await uploadButton.click();
+    await page.waitForTimeout(1_200);
+  } finally {
+    if (temporaryTextPath) await unlink(temporaryTextPath).catch(() => {});
+  }
 
   const visibleText = await page.locator("body").innerText();
   if (/upload failed|could not upload|invalid file|error occurred/i.test(visibleText)) {
-    throw new Error("QikNet reported an Excel upload error.");
+    throw new Error("QikNet reported a text voucher upload error.");
+  }
+  await dismissQikNetUploadModal(page);
+}
+
+async function dismissQikNetUploadModal(page) {
+  const overlay = page.locator("div.fixed.inset-0.z-50").last();
+  if (!(await overlay.isVisible().catch(() => false))) return;
+
+  await page.keyboard.press("Escape").catch(() => {});
+  await page.waitForTimeout(250);
+  if (await overlay.isVisible().catch(() => false)) {
+    const closeButton = overlay.locator("button").first();
+    if (await closeButton.isVisible().catch(() => false)) await closeButton.click({ force: true });
+  }
+  const closed = await overlay.waitFor({ state: "hidden", timeout: 3_000 }).then(() => true).catch(() => false);
+  if (!closed) {
+    await page.reload({ waitUntil: "domcontentloaded" });
   }
 }
 
 async function findQikNetBranchCard(page, branchName) {
+  await page.locator("main article article").filter({ hasText: "available vouchers" }).first()
+    .waitFor({ state: "visible", timeout: 15_000 });
   const summary = await page.locator("main").innerText();
   const totalPages = Number(summary.match(/Page\s+\d+\s+of\s+(\d+)/i)?.[1] ?? 1);
 
@@ -496,6 +620,23 @@ async function findQikNetBranchCard(page, branchName) {
   }
 
   throw new Error(`QikNet branch '${branchName}' was not found.`);
+}
+
+async function findQikNetBranchCardWithRetry(page, branchName) {
+  let lastError;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await findQikNetBranchCard(page, branchName);
+    } catch (error) {
+      lastError = error;
+      if (attempt < 3) {
+        log(`QikNet branch cards were not ready for ${branchName} (attempt ${attempt}/3).`);
+        await page.reload({ waitUntil: "domcontentloaded" });
+        await page.getByRole("heading", { name: /Inventory By Branch/ }).waitFor({ state: "visible" });
+      }
+    }
+  }
+  throw lastError;
 }
 
 function parseVoucherGroup(cardText, groupName) {
@@ -598,23 +739,170 @@ async function createPortalContext(browserInstance) {
 }
 
 async function exportRuijieItem(item) {
-  const exportContext = await createPortalContext(browser);
-  const exportPage = await exportContext.newPage();
+  return createRuijieApiVouchers(item);
+}
 
-  try {
-    await withTimeout(loginRuijie(exportPage), 180_000, `Ruijie sign-in for ${item.qiknetGroup}`);
-    return await withTimeout(
-      prepareRuijieExport(exportPage, item),
-      180_000,
-      `Ruijie export ${item.qiknetGroup}`,
-    );
-  } finally {
-    try {
-      await withTimeout(exportContext.close(), 15_000, `Ruijie cleanup for ${item.qiknetGroup}`);
-    } catch (error) {
-      log(`WARNING: ${formatError(error)}`);
-    }
+async function getRuijieSession() {
+  if (!ruijieSessionPromise) {
+    ruijieSessionPromise = (async () => {
+      const response = await fetch(`${ruijieApiBaseUrl}/service/api/oauth20/client/access_token?token=d63dss0a81e4415a889ac5b78fsc904a`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ appid: credentials.ruijieApiAppId, secret: credentials.ruijieApiSecret }),
+        signal: AbortSignal.timeout(20_000),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok || result.code !== 0 || !result.accessToken) {
+        throw new Error(`Ruijie API authentication failed (HTTP ${response.status}, API code ${result.code ?? "unknown"}).`);
+      }
+      const account = await ruijieApiRequest("/service/api/org/account/info", { accessToken: result.accessToken });
+      if (!account.account || !account.userName) throw new Error("Ruijie API account identity was incomplete.");
+      return { accessToken: result.accessToken, tenantName: account.account, userName: account.userName };
+    })();
   }
+  return ruijieSessionPromise;
+}
+
+async function ruijieApiRequest(pathname, { accessToken, method = "GET", params = {}, body } = {}) {
+  const url = new URL(pathname, ruijieApiBaseUrl);
+  url.searchParams.set("access_token", accessToken);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
+  const response = await fetch(url, {
+    method,
+    headers: body ? { "content-type": "application/json" } : undefined,
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(30_000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.code !== 0) {
+    throw new Error(`Ruijie API request failed (HTTP ${response.status}, API code ${result.code ?? "unknown"}).`);
+  }
+  return result;
+}
+
+async function getRuijieProjectId(projectName, accessToken) {
+  if (ruijieGroupCache.has(projectName)) return ruijieGroupCache.get(projectName);
+  const tree = await ruijieApiRequest("/service/api/group/single/tree", {
+    accessToken,
+    params: { depth: "BUILDING" },
+  });
+  const matches = [];
+  walkObjects(tree, (value) => {
+    if (value?.name === projectName && value.groupId != null) matches.push(value.groupId);
+  });
+  if (matches.length !== 1) throw new Error(`Expected one Ruijie API project named '${projectName}', found ${matches.length}.`);
+  ruijieGroupCache.set(projectName, matches[0]);
+  return matches[0];
+}
+
+async function getRuijieVoucherProfile(groupId, groupName, accessToken) {
+  const key = `${groupId}:${groupName}`;
+  if (ruijieProfileCache.has(key)) return ruijieProfileCache.get(key);
+  const result = await ruijieApiRequest(`/service/api/intl/usergroup/list/${encodeURIComponent(groupId)}`, {
+    accessToken,
+    params: { pageIndex: 0, pageSize: 1000 },
+  });
+  const records = Array.isArray(result.data) ? result.data : [];
+  const matches = records.filter((record) => record.name === groupName || record.userGroupName === groupName);
+  if (matches.length !== 1 || matches[0].id == null || !matches[0].authProfileId) {
+    throw new Error(`Expected one complete Ruijie API voucher profile named '${groupName}', found ${matches.length}.`);
+  }
+  const profile = { userGroupId: matches[0].id, authProfileId: matches[0].authProfileId };
+  ruijieProfileCache.set(key, profile);
+  return profile;
+}
+
+async function createRuijieApiVouchers(item) {
+  const requestedCount = item.qiknetAvailable < config.stockPolicy.criticalBelow
+    ? config.stockPolicy.criticalBatchSize
+    : config.stockPolicy.batchSize;
+  const session = await getRuijieSession();
+  const groupId = await getRuijieProjectId(item.branch.ruijieProject, session.accessToken);
+  const profile = await getRuijieVoucherProfile(groupId, item.ruijieGroup, session.accessToken);
+  const comment = `QikNet automated refill: ${item.branch.qiknetName} / ${item.qiknetGroup}`;
+  const vouchers = await listReusableRuijieVouchers({
+    session,
+    groupId,
+    profile,
+    comment,
+    limit: requestedCount,
+  });
+
+  if (!dryRun) {
+    const reusedCount = vouchers.length;
+    for (let remaining = requestedCount - reusedCount; remaining > 0; remaining -= 100) {
+      const quantity = Math.min(100, remaining);
+      const result = await ruijieApiRequest(
+        `/service/api/intlSamVoucher/create/${encodeURIComponent(session.tenantName)}/${encodeURIComponent(session.userName)}/${encodeURIComponent(groupId)}`,
+        {
+          accessToken: session.accessToken,
+          method: "POST",
+          body: {
+            quantity,
+            profile: profile.authProfileId,
+            userGroupId: profile.userGroupId,
+            comment,
+          },
+        },
+      );
+      if (result.voucherData?.code !== 0) {
+        throw new Error(`Ruijie voucher creation failed (voucher API code ${result.voucherData?.code ?? "unknown"}).`);
+      }
+      const created = result.voucherData?.list?.map((voucher) => voucher.codeNo).filter(Boolean) ?? [];
+      if (created.length !== quantity) throw new Error(`Ruijie API created ${created.length} of ${quantity} requested vouchers.`);
+      vouchers.push(...created);
+    }
+    const createdCount = vouchers.length - reusedCount;
+    log(`Ruijie API supplied ${vouchers.length} voucher(s) for ${item.qiknetGroup} (${reusedCount} reused, ${createdCount} created).`);
+  }
+
+  const action = {
+    branch: item.branch.qiknetName,
+    stationCode: item.branch.stationCode,
+    voucherGroup: item.qiknetGroup,
+    sourceProject: item.branch.ruijieProject,
+    sourceGroup: item.ruijieGroup,
+    qiknetAvailableBefore: item.qiknetAvailable,
+    qiknetStatusBefore: item.qiknetStatus,
+    target: item.target,
+    requestedCount,
+    voucherCount: vouchers.length,
+    source: "ruijie-api",
+    status: dryRun ? "dry-run" : "generated",
+  };
+  Object.defineProperty(action, "vouchers", { value: vouchers, enumerable: false });
+  return action;
+}
+
+async function listReusableRuijieVouchers({ session, groupId, profile, comment, limit }) {
+  const vouchers = [];
+  for (let start = 0; start < 2000 && vouchers.length < limit; start += 200) {
+    const result = await ruijieApiRequest(
+      `/service/api/intlSamVoucher/getList/${encodeURIComponent(session.tenantName)}/${encodeURIComponent(groupId)}`,
+      {
+        accessToken: session.accessToken,
+        params: { start, pageSize: 200, status: 1 },
+      },
+    );
+    if (result.voucherData?.code !== 0) {
+      throw new Error(`Ruijie voucher listing failed (voucher API code ${result.voucherData?.code ?? "unknown"}).`);
+    }
+    const records = result.voucherData?.list ?? [];
+    for (const voucher of records) {
+      const code = voucher.codeNo ?? voucher.voucherCode;
+      const sameGroup = voucher.userGroupId == null || String(voucher.userGroupId) === String(profile.userGroupId);
+      if (code && voucher.comment === comment && sameGroup) vouchers.push(code);
+      if (vouchers.length >= limit) break;
+    }
+    if (records.length < 200) break;
+  }
+  return [...new Set(vouchers)].slice(0, limit);
+}
+
+function walkObjects(value, visitor) {
+  if (!value || typeof value !== "object") return;
+  visitor(value);
+  for (const child of Object.values(value)) walkObjects(child, visitor);
 }
 
 async function withTimeout(promise, timeoutMs, label) {
