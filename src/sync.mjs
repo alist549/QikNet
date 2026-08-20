@@ -164,10 +164,17 @@ try {
 
   const reportPath = path.join(REPORT_DIR, `sync-${safeTimestamp(report.startedAt)}.json`);
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  await browser.close();
+  let browserCloseTimedOut = false;
+  try {
+    await withTimeout(browser.close(), 15_000, "Browser shutdown");
+  } catch (error) {
+    browserCloseTimedOut = true;
+    log(`WARNING: ${formatError(error)}`);
+  }
   log(`Report written to ${reportPath}`);
 
   if (report.errors.length) process.exitCode = 1;
+  if (browserCloseTimedOut) process.exit(process.exitCode ?? 0);
 }
 
 async function loginQikNet(page) {
@@ -330,18 +337,30 @@ async function prepareRuijieExport(page, item) {
 
   await dismissRuijieReleaseOverlay(page);
   const projectsPage = page;
-  const projectUrl = /#\/monitor_project_workbarn_menu/;
-  const samePageNavigation = page
-    .waitForURL(projectUrl, { timeout: navigationTimeout })
-    .then(() => page);
-  const popupNavigation = page.context()
-    .waitForEvent("page", { timeout: navigationTimeout })
-    .then(async (popup) => {
-      await popup.waitForURL(projectUrl, { timeout: navigationTimeout });
-      return popup;
-    });
-  await projectRow.getByRole("img", { name: "Go to this project" }).click({ force: true });
-  page = await Promise.any([samePageNavigation, popupNavigation]);
+  await projectRow.getByRole("img", { name: "Go to this project" }).click({
+    force: true,
+    noWaitAfter: true,
+  });
+
+  const projectDeadline = Date.now() + navigationTimeout;
+  let openedProjectPage = null;
+  while (!openedProjectPage && Date.now() < projectDeadline) {
+    const candidates = [...page.context().pages()].reverse();
+    for (const candidate of candidates) {
+      const projectMenu = candidate.getByText("Auth & Accounts", { exact: true });
+      if (await projectMenu.isVisible().catch(() => false)) {
+        openedProjectPage = candidate;
+        break;
+      }
+    }
+    if (!openedProjectPage) await page.waitForTimeout(500);
+  }
+
+  if (!openedProjectPage) {
+    const visibleUrls = page.context().pages().map((candidate) => candidate.url()).join(", ");
+    throw new Error(`Ruijie project menu did not become visible. Open pages: ${visibleUrls}`);
+  }
+  page = openedProjectPage;
 
   await page.getByText("Auth & Accounts", { exact: true }).click();
   await page.getByRole("link", { name: "User Management", exact: true }).click();
