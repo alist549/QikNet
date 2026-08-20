@@ -363,9 +363,10 @@ async function prepareRuijieExport(page, item) {
   page = openedProjectPage;
 
   await page.getByText("Auth & Accounts", { exact: true }).click();
-  await page.getByRole("link", { name: "User Management", exact: true }).click();
-  await page.waitForURL(/#\/config_group_userManagement_menu/, { timeout: navigationTimeout });
-  await page.getByRole("tab", { name: "Voucher", exact: true }).click();
+  await page.getByRole("link", { name: "User Management", exact: true }).click({ noWaitAfter: true });
+  const voucherTab = page.getByRole("tab", { name: "Voucher", exact: true });
+  await voucherTab.waitFor({ state: "visible", timeout: navigationTimeout });
+  await voucherTab.click();
 
   const panel = page.getByRole("tabpanel", { name: "Voucher" });
   const search = panel.locator('input[placeholder="Voucher/User group"]:visible').last();
