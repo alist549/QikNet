@@ -65,7 +65,6 @@ const browser = await chromium.launch({
 let context = await createPortalContext(browser);
 
 let qiknetPage = await context.newPage();
-let ruijiePage = null;
 
 try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
@@ -83,14 +82,12 @@ try {
     await qiknetPage.close();
     qiknetPage = null;
     await context.close();
-    context = await createPortalContext(browser);
-    ruijiePage = await context.newPage();
-    await withTimeout(loginRuijie(ruijiePage), 180_000, "Ruijie sign-in");
+    context = null;
 
     if (dryRun) {
       for (const item of work) {
         try {
-          const action = await withTimeout(prepareRuijieExport(ruijiePage, item), 180_000, `Ruijie export ${item.qiknetGroup}`);
+          const action = await exportRuijieItem(item);
           action.status = "dry-run";
           report.actions.push(action);
           log(`[DRY RUN] ${item.branch.qiknetName} / ${item.qiknetGroup}: ${action.sourceCount} unused source voucher(s).`);
@@ -103,7 +100,7 @@ try {
       const exported = [];
       for (const item of work) {
         try {
-          const action = await withTimeout(prepareRuijieExport(ruijiePage, item), 180_000, `Ruijie export ${item.qiknetGroup}`);
+          const action = await exportRuijieItem(item);
           action.status = "exported";
           report.actions.push(action);
           exported.push({ item, action });
@@ -111,10 +108,6 @@ try {
           recordItemError(item, error);
         }
       }
-
-      await ruijiePage.close();
-      ruijiePage = null;
-      await context.close();
 
       if (exported.length) {
         context = await createPortalContext(browser);
@@ -525,6 +518,22 @@ async function createPortalContext(browserInstance) {
   portalContext.setDefaultTimeout(actionTimeout);
   portalContext.setDefaultNavigationTimeout(navigationTimeout);
   return portalContext;
+}
+
+async function exportRuijieItem(item) {
+  const exportContext = await createPortalContext(browser);
+  const exportPage = await exportContext.newPage();
+
+  try {
+    await withTimeout(loginRuijie(exportPage), 180_000, `Ruijie sign-in for ${item.qiknetGroup}`);
+    return await withTimeout(
+      prepareRuijieExport(exportPage, item),
+      180_000,
+      `Ruijie export ${item.qiknetGroup}`,
+    );
+  } finally {
+    await exportContext.close().catch(() => {});
+  }
 }
 
 async function withTimeout(promise, timeoutMs, label) {
