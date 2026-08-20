@@ -52,7 +52,9 @@ const browserArgs = [
   "--disable-backgrounding-occluded-windows",
   "--disable-dev-shm-usage",
   "--disable-gpu",
+  "--disable-software-rasterizer",
   "--no-sandbox",
+  "--renderer-process-limit=2",
 ];
 
 const browser = await chromium.launch({
@@ -60,13 +62,7 @@ const browser = await chromium.launch({
   args: browserArgs,
 });
 
-const context = await browser.newContext({
-  acceptDownloads: true,
-  timezoneId: "Africa/Harare",
-  locale: "en-ZW",
-});
-context.setDefaultTimeout(actionTimeout);
-context.setDefaultNavigationTimeout(navigationTimeout);
+let context = await createPortalContext(browser);
 
 let qiknetPage = await context.newPage();
 let ruijiePage = null;
@@ -86,6 +82,8 @@ try {
   } else {
     await qiknetPage.close();
     qiknetPage = null;
+    await context.close();
+    context = await createPortalContext(browser);
     ruijiePage = await context.newPage();
     await withTimeout(loginRuijie(ruijiePage), 180_000, "Ruijie sign-in");
 
@@ -116,8 +114,10 @@ try {
 
       await ruijiePage.close();
       ruijiePage = null;
+      await context.close();
 
       if (exported.length) {
+        context = await createPortalContext(browser);
         qiknetPage = await context.newPage();
         await withTimeout(loginQikNet(qiknetPage), 120_000, "QikNet upload sign-in");
       }
@@ -498,6 +498,17 @@ function formatError(error) {
 
 function splitRecipients(value) {
   return [...new Set(String(value).split(",").map((recipient) => recipient.trim()).filter(Boolean))];
+}
+
+async function createPortalContext(browserInstance) {
+  const portalContext = await browserInstance.newContext({
+    acceptDownloads: true,
+    timezoneId: "Africa/Harare",
+    locale: "en-ZW",
+  });
+  portalContext.setDefaultTimeout(actionTimeout);
+  portalContext.setDefaultNavigationTimeout(navigationTimeout);
+  return portalContext;
 }
 
 async function withTimeout(promise, timeoutMs, label) {
