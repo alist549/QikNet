@@ -306,6 +306,9 @@ function buildWorkList(inventory) {
 
 async function prepareRuijieExport(page, item) {
   log(`Reading Ruijie stock for ${item.branch.ruijieProject} / ${item.ruijieGroup}.`);
+  for (const candidate of page.context().pages()) {
+    if (candidate !== page) await candidate.close().catch(() => {});
+  }
   const email = page.getByPlaceholder("Email Address (Account)");
   const stationMarker = page.getByText("QikNet HotSpot", { exact: false }).first();
   const state = await openRuijieProjects(page, email, stationMarker);
@@ -317,7 +320,11 @@ async function prepareRuijieExport(page, item) {
   }
 
   await dismissRuijieReleaseOverlay(page);
+  const projectsPage = page;
+  const projectPagePromise = page.context().waitForEvent("page", { timeout: 5_000 }).catch(() => null);
   await projectRow.getByRole("img", { name: "Go to this project" }).click({ force: true });
+  const openedProjectPage = await projectPagePromise;
+  if (openedProjectPage) page = openedProjectPage;
   await page.waitForURL(/#\/monitor_project_workbarn_menu/, { timeout: navigationTimeout });
 
   await page.getByText("Auth & Accounts", { exact: true }).click();
@@ -346,7 +353,7 @@ async function prepareRuijieExport(page, item) {
   const download = await downloadPromise;
   await download.saveAs(filePath);
 
-  return {
+  const action = {
     branch: item.branch.qiknetName,
     stationCode: item.branch.stationCode,
     voucherGroup: item.qiknetGroup,
@@ -359,6 +366,8 @@ async function prepareRuijieExport(page, item) {
     filePath,
     status: "exported",
   };
+  if (page !== projectsPage) await page.close().catch(() => {});
+  return action;
 }
 
 async function uploadQikNetInventory(page, item, filePath) {
