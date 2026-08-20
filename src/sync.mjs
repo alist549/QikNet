@@ -70,7 +70,7 @@ try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
 
   await withTimeout(loginQikNet(qiknetPage), 120_000, "QikNet sign-in");
-  const inventory = await withTimeout(readQikNetInventory(qiknetPage), 120_000, "QikNet inventory scan");
+  const inventory = await readQikNetInventoryWithRetry(qiknetPage, "QikNet inventory scan");
   report.inventory = inventory;
 
   const work = buildWorkList(inventory);
@@ -128,7 +128,7 @@ try {
 
       if (report.actions.some((action) => action.status === "uploaded")) {
         await qiknetPage.waitForTimeout(1_000);
-        report.inventoryAfter = await withTimeout(readQikNetInventory(qiknetPage), 120_000, "QikNet post-upload inventory scan");
+        report.inventoryAfter = await readQikNetInventoryWithRetry(qiknetPage, "QikNet post-upload inventory scan");
         verifyReplenishmentTargets(report.inventoryAfter);
       }
       report.status = report.errors.length ? "completed-with-errors" : "updated";
@@ -265,6 +265,22 @@ async function readQikNetInventory(page) {
   }
 
   return records;
+}
+
+async function readQikNetInventoryWithRetry(page, label) {
+  let lastError;
+
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      return await withTimeout(readQikNetInventory(page), 120_000, label);
+    } catch (error) {
+      lastError = error;
+      log(`${label} was not ready (attempt ${attempt}/3): ${formatError(error)}`);
+      if (attempt < 3) await page.waitForTimeout(2_000);
+    }
+  }
+
+  throw lastError ?? new Error(`${label} failed after 3 attempts.`);
 }
 
 function buildWorkList(inventory) {
