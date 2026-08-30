@@ -2,7 +2,7 @@
 
 This package contains two scheduled jobs and one manual test:
 
-1. **Voucher stock sync:** Runs daily at 05:30 Africa/Harare. A voucher group is low when it has fewer than **100** available codes. The job exports the matching **Not used** vouchers from Ruijie and uploads them to QikNet, aiming for at least **500** available codes.
+1. **Voucher stock sync:** Runs twice daily at 05:30 and 17:30 Africa/Harare. A voucher group is low when it has fewer than **200** available codes. The job obtains **200** matching unused vouchers from Ruijie and uploads them to QikNet, ensuring at least **200** codes are available after a refill.
 2. **Station monitor:** Runs every 15 minutes. It reads the online/total device counts on the Ruijie project overview and sends an outage SMS when a station becomes down or degraded.
 3. **SMS test:** A manual-only workflow sends one test message to every unique configured report and outage recipient.
 
