@@ -5,9 +5,8 @@ export function isAlertDue(now, alertCount, nextAlertAt) {
 }
 
 export function nextAlertDelayMinutes(completedAlertCount) {
-  if (completedAlertCount < 3) return 15;
-  if (completedAlertCount < 6) return 60;
-  if (completedAlertCount < 9) return 120;
+  if (completedAlertCount < 3) return 60;
+  if (completedAlertCount < 6) return 120;
   return 240;
 }
 
