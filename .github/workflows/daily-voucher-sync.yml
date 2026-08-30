@@ -2,8 +2,8 @@ name: Daily QikNet voucher sync
 
 on:
   schedule:
-    # 05:30 Africa/Harare (UTC+2)
-    - cron: "30 3 * * *"
+    # 05:30 and 17:30 Africa/Harare (UTC+2)
+    - cron: "30 3,15 * * *"
   workflow_dispatch:
     inputs:
       dry_run:
