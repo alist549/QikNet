@@ -850,17 +850,13 @@ async function createRuijieApiVouchers(item) {
   const groupId = await getRuijieProjectId(item.branch.ruijieProject, session.accessToken);
   const profile = await getRuijieVoucherProfile(groupId, item.ruijieGroup, session.accessToken);
   const comment = `QikNet automated refill: ${item.branch.qiknetName} / ${item.qiknetGroup}`;
-  const vouchers = await listReusableRuijieVouchers({
-    session,
-    groupId,
-    profile,
-    comment,
-    limit: requestedCount,
-  });
+  const vouchers = [];
 
   if (!dryRun) {
-    const reusedCount = vouchers.length;
-    for (let remaining = requestedCount - reusedCount; remaining > 0; remaining -= 100) {
+    // Ruijie cannot see when a voucher imported into QikNet has been consumed.
+    // Reusing codes that Ruijie still labels "unused" therefore causes QikNet to
+    // reject most of a refill as duplicates. Always create fresh codes instead.
+    for (let remaining = requestedCount; remaining > 0; remaining -= 100) {
       const quantity = Math.min(100, remaining);
       const result = await ruijieApiRequest(
         `/service/api/intlSamVoucher/create/${encodeURIComponent(session.tenantName)}/${encodeURIComponent(session.userName)}/${encodeURIComponent(groupId)}`,
@@ -882,8 +878,7 @@ async function createRuijieApiVouchers(item) {
       if (created.length !== quantity) throw new Error(`Ruijie API created ${created.length} of ${quantity} requested vouchers.`);
       vouchers.push(...created);
     }
-    const createdCount = vouchers.length - reusedCount;
-    log(`Ruijie API supplied ${vouchers.length} voucher(s) for ${item.qiknetGroup} (${reusedCount} reused, ${createdCount} created).`);
+    log(`Ruijie API created ${vouchers.length} fresh voucher(s) for ${item.qiknetGroup}.`);
   }
 
   const action = {
@@ -902,31 +897,6 @@ async function createRuijieApiVouchers(item) {
   };
   Object.defineProperty(action, "vouchers", { value: vouchers, enumerable: false });
   return action;
-}
-
-async function listReusableRuijieVouchers({ session, groupId, profile, comment, limit }) {
-  const vouchers = [];
-  for (let start = 0; start < 2000 && vouchers.length < limit; start += 200) {
-    const result = await ruijieApiRequest(
-      `/service/api/intlSamVoucher/getList/${encodeURIComponent(session.tenantName)}/${encodeURIComponent(groupId)}`,
-      {
-        accessToken: session.accessToken,
-        params: { start, pageSize: 200, status: 1 },
-      },
-    );
-    if (result.voucherData?.code !== 0) {
-      throw new Error(`Ruijie voucher listing failed (voucher API code ${result.voucherData?.code ?? "unknown"}).`);
-    }
-    const records = result.voucherData?.list ?? [];
-    for (const voucher of records) {
-      const code = voucher.codeNo ?? voucher.voucherCode;
-      const sameGroup = voucher.userGroupId == null || String(voucher.userGroupId) === String(profile.userGroupId);
-      if (code && voucher.comment === comment && sameGroup) vouchers.push(code);
-      if (vouchers.length >= limit) break;
-    }
-    if (records.length < 200) break;
-  }
-  return [...new Set(vouchers)].slice(0, limit);
 }
 
 function walkObjects(value, visitor) {
