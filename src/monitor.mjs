@@ -125,15 +125,23 @@ async function getRuijieApiSession() {
 }
 
 async function ruijieApiGet(apiPath, accessToken, params = {}) {
-  const url = new URL(apiPath, ruijieApiBaseUrl);
-  url.searchParams.set("access_token", accessToken);
-  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
-  const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
-  const result = await response.json().catch(() => ({}));
-  if (!response.ok || result.code !== 0) {
-    throw new Error(`Ruijie API request failed for ${apiPath} (HTTP ${response.status}, API code ${result.code ?? "unknown"}).`);
+  let lastFailure;
+  for (let attempt = 1; attempt <= 3; attempt += 1) {
+    try {
+      const url = new URL(apiPath, ruijieApiBaseUrl);
+      url.searchParams.set("access_token", accessToken);
+      for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
+      const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+      const result = await response.json().catch(() => ({}));
+      if (response.ok && result.code === 0) return result;
+      lastFailure = `HTTP ${response.status}, API code ${result.code ?? "unknown"}`;
+    } catch (error) {
+      lastFailure = formatError(error);
+    }
+    if (attempt < 3) await new Promise((resolve) => setTimeout(resolve, attempt * 1_500));
   }
-  return result;
+  const requestType = params.common_type ? ` (${params.common_type})` : "";
+  throw new Error(`Ruijie API request failed for ${apiPath}${requestType} after 3 attempts: ${lastFailure}.`);
 }
 
 async function readStationStatusesApi() {
