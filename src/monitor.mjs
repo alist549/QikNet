@@ -1,4 +1,3 @@
-import { chromium } from "playwright";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -14,11 +13,9 @@ const REPORT_DIR = path.join(ROOT, "reports", "monitor");
 const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 
 const sendSms = parseBoolean(process.env.SEND_SMS, true);
-const headless = parseBoolean(process.env.HEADLESS, true);
-const actionTimeout = parsePositiveInteger(process.env.ACTION_TIMEOUT_MS, 20_000);
-const navigationTimeout = parsePositiveInteger(process.env.NAVIGATION_TIMEOUT_MS, 45_000);
-const ruijieEmail = requiredEnv("RUIJIE_EMAIL");
-const ruijiePassword = requiredEnv("RUIJIE_PASSWORD");
+const ruijieApiAppId = requiredEnv("RUIJIE_API_APP_ID");
+const ruijieApiSecret = requiredEnv("RUIJIE_API_SECRET");
+const ruijieApiBaseUrl = String(process.env.RUIJIE_API_BASE_URL || "https://cloud-eu.ruijienetworks.com").replace(/\/$/, "");
 const smsToken = sendSms ? requiredEnv("SMSPOP_TOKEN") : process.env.SMSPOP_TOKEN;
 const defaultOutageRecipients = (sendSms ? requiredEnv("DEFAULT_OUTAGE_RECIPIENTS") : process.env.DEFAULT_OUTAGE_RECIPIENTS ?? "")
   .split(",")
@@ -39,23 +36,8 @@ const report = {
   errors: [],
 };
 
-const browser = await chromium.launch({
-  headless,
-  args: [
-    "--disable-backgrounding-occluded-windows",
-    "--disable-dev-shm-usage",
-    "--disable-gpu",
-    "--no-sandbox",
-  ],
-});
-const context = await browser.newContext({ timezoneId: "Africa/Harare", locale: "en-ZW" });
-context.setDefaultTimeout(actionTimeout);
-context.setDefaultNavigationTimeout(navigationTimeout);
-const page = await context.newPage();
-
 try {
-  await loginRuijie(page);
-  const stations = await readStationStatuses(page);
+  const stations = await readStationStatusesApi();
 
   for (const station of stations) {
     const previous = previousState.stations?.[station.projectName] ?? {};
@@ -125,8 +107,83 @@ try {
     `${JSON.stringify(report, null, 2)}\n`,
     "utf8",
   );
-  await browser.close();
   if (report.errors.length) process.exitCode = 1;
+}
+
+async function getRuijieApiSession() {
+  const response = await fetch(`${ruijieApiBaseUrl}/service/api/oauth20/client/access_token?token=d63dss0a81e4415a889ac5b78fsc904a`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ appid: ruijieApiAppId, secret: ruijieApiSecret }),
+    signal: AbortSignal.timeout(20_000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.code !== 0 || !result.accessToken) {
+    throw new Error(`Ruijie API authentication failed (HTTP ${response.status}, API code ${result.code ?? "unknown"}).`);
+  }
+  return result.accessToken;
+}
+
+async function ruijieApiGet(apiPath, accessToken, params = {}) {
+  const url = new URL(apiPath, ruijieApiBaseUrl);
+  url.searchParams.set("access_token", accessToken);
+  for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
+  const response = await fetch(url, { signal: AbortSignal.timeout(20_000) });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok || result.code !== 0) {
+    throw new Error(`Ruijie API request failed for ${apiPath} (HTTP ${response.status}, API code ${result.code ?? "unknown"}).`);
+  }
+  return result;
+}
+
+async function readStationStatusesApi() {
+  console.log("Reading Ruijie station status through the API...");
+  const accessToken = await getRuijieApiSession();
+  const tree = await ruijieApiGet("/service/api/group/single/tree", accessToken, { depth: "BUILDING" });
+  const projects = new Map();
+  walkObjects(tree, (value) => {
+    const name = value.name ?? value.groupName ?? value.projectName;
+    const groupId = value.groupId ?? value.id;
+    if (name && groupId != null) projects.set(String(name), groupId);
+  });
+
+  const componentTypes = [
+    ["AP", "AP"],
+    ["SWITCH", "Switch"],
+    ["GATEWAY", "Gateway"],
+    ["BRIDGE", "Wireless Bridge"],
+  ];
+  const stations = [];
+
+  for (const branch of config.branches.filter((entry) => entry.enabled)) {
+    const groupId = projects.get(branch.ruijieProject);
+    if (groupId == null) throw new Error(`Ruijie API project was not found: ${branch.ruijieProject}.`);
+    const components = [];
+    for (const [commonType, name] of componentTypes) {
+      const result = await ruijieApiGet("/service/api/maint/devices", accessToken, {
+        common_type: commonType,
+        group_id: groupId,
+        page: 1,
+        per_page: 100,
+      });
+      const devices = result.deviceList ?? result.data?.list ?? result.dataList ?? result.list ?? [];
+      if (!devices.length) continue;
+      const online = devices.filter((device) => String(device.onlineStatus ?? device.status ?? "").toUpperCase() === "ON").length;
+      components.push({ name, online, total: devices.length });
+    }
+    if (!components.length) throw new Error(`Ruijie API returned no devices for ${branch.ruijieProject}.`);
+    const hasOfflineComponent = components.some((component) => component.online === 0 && component.total > 0);
+    const hasDegradedComponent = components.some((component) => component.online < component.total);
+    const status = hasOfflineComponent ? "down" : hasDegradedComponent ? "degraded" : "up";
+    stations.push({ branchName: branch.qiknetName, projectName: branch.ruijieProject, status, components });
+  }
+  return stations;
+}
+
+function walkObjects(value, visitor) {
+  if (!value || typeof value !== "object") return;
+  visitor(value);
+  for (const child of Object.values(value)) walkObjects(child, visitor);
 }
 
 async function loginRuijie(page) {

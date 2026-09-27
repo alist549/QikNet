@@ -1,4 +1,3 @@
-import { chromium } from "playwright";
 import { mkdir, readFile, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import process from "node:process";
@@ -12,7 +11,6 @@ const REPORT_DIR = path.join(ROOT, "reports");
 const config = JSON.parse(await readFile(CONFIG_PATH, "utf8"));
 const dryRun = parseBoolean(process.env.DRY_RUN, true);
 const allowQikNetUpload = parseBoolean(process.env.ALLOW_QIKNET_UPLOAD, false);
-const headless = parseBoolean(process.env.HEADLESS, true);
 const actionTimeout = parsePositiveInteger(process.env.ACTION_TIMEOUT_MS, 20_000);
 const navigationTimeout = parsePositiveInteger(process.env.NAVIGATION_TIMEOUT_MS, 45_000);
 const selectedBranches = new Set(
@@ -29,7 +27,9 @@ const credentials = {
   ruijieApiSecret: requiredEnv("RUIJIE_API_SECRET"),
 };
 const ruijieApiBaseUrl = String(process.env.RUIJIE_API_BASE_URL || "https://cloud-eu.ruijienetworks.com").replace(/\/$/, "");
+const qiknetApiBaseUrl = String(process.env.QIKNET_API_BASE_URL || "https://qiknet-backend-164518585796.us-central1.run.app/api").replace(/\/$/, "");
 let ruijieSessionPromise;
+let qiknetTokenPromise;
 const ruijieGroupCache = new Map();
 const ruijieProfileCache = new Map();
 
@@ -52,29 +52,10 @@ if (!dryRun && !allowQikNetUpload) {
 await mkdir(DOWNLOAD_DIR, { recursive: true });
 await mkdir(REPORT_DIR, { recursive: true });
 
-const browserArgs = [
-  "--disable-backgrounding-occluded-windows",
-  "--disable-dev-shm-usage",
-  "--disable-gpu",
-  "--disable-software-rasterizer",
-  "--no-sandbox",
-  "--renderer-process-limit=2",
-];
-
-const browser = await chromium.launch({
-  headless,
-  args: browserArgs,
-});
-
-let context = await createPortalContext(browser);
-
-let qiknetPage = await context.newPage();
-
 try {
   log(`Starting daily voucher sync (${dryRun ? "DRY RUN" : "LIVE"})`);
 
-  await withTimeout(loginQikNet(qiknetPage), 120_000, "QikNet sign-in");
-  const inventory = await readQikNetInventoryWithRetry(qiknetPage, "QikNet inventory scan");
+  const inventory = await readQikNetApiInventory();
   report.inventory = inventory;
 
   const work = buildWorkList(inventory);
@@ -83,11 +64,6 @@ try {
   if (work.length === 0) {
     report.status = "healthy";
   } else {
-    await qiknetPage.close();
-    qiknetPage = null;
-    await context.close();
-    context = null;
-
     if (dryRun) {
       for (const item of work) {
         try {
@@ -113,15 +89,10 @@ try {
         }
       }
 
-      if (exported.length) {
-        context = await createPortalContext(browser);
-        qiknetPage = await context.newPage();
-        await withTimeout(loginQikNet(qiknetPage), 120_000, "QikNet upload sign-in");
-      }
-
       for (const { item, action } of exported) {
         try {
-          await withTimeout(uploadQikNetInventory(qiknetPage, item, action.vouchers), 120_000, `QikNet upload ${item.qiknetGroup}`);
+          const upload = await uploadQikNetApiInventory(item, action.vouchers);
+          action.qiknetImportedRows = upload.importedRows;
           action.status = "uploaded";
           log(`Updated ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
         } catch (error) {
@@ -133,8 +104,8 @@ try {
       if (report.actions.some((action) => action.status === "uploaded")) {
         // QikNet accepts the text upload immediately but updates inventory
         // asynchronously; Unit M consistently settled within this window.
-        await qiknetPage.waitForTimeout(30_000);
-        report.inventoryAfter = await readQikNetInventoryWithRetry(qiknetPage, "QikNet post-upload inventory scan");
+        await delay(30_000);
+        report.inventoryAfter = await readQikNetApiInventory();
         verifyReplenishmentTargets(report.inventoryAfter);
       }
       report.status = report.errors.length ? "completed-with-errors" : "updated";
@@ -183,17 +154,90 @@ try {
 
   const reportPath = path.join(REPORT_DIR, `sync-${safeTimestamp(report.startedAt)}.json`);
   await writeFile(reportPath, `${JSON.stringify(report, null, 2)}\n`, "utf8");
-  let browserCloseTimedOut = false;
-  try {
-    await withTimeout(browser.close(), 15_000, "Browser shutdown");
-  } catch (error) {
-    browserCloseTimedOut = true;
-    log(`WARNING: ${formatError(error)}`);
-  }
   log(`Report written to ${reportPath}`);
 
   if (report.errors.length) process.exitCode = 1;
-  if (browserCloseTimedOut) process.exit(process.exitCode ?? 0);
+}
+
+async function getQikNetToken() {
+  if (!qiknetTokenPromise) {
+    qiknetTokenPromise = (async () => {
+      const result = await qiknetApiRequest("/auth/login", {
+        method: "POST",
+        body: { email: credentials.qiknetEmail, password: credentials.qiknetPassword },
+        authenticate: false,
+      });
+      const token = result.token ?? result.accessToken ?? result.data?.token ?? result.data?.accessToken;
+      if (!token) throw new Error("QikNet API authentication succeeded without returning a token.");
+      return token;
+    })();
+  }
+  return qiknetTokenPromise;
+}
+
+async function qiknetApiRequest(apiPath, { method = "GET", body, authenticate = true } = {}) {
+  const headers = { accept: "application/json" };
+  if (body) headers["content-type"] = "application/json";
+  if (authenticate) headers.authorization = `Bearer ${await getQikNetToken()}`;
+  const response = await fetch(`${qiknetApiBaseUrl}${apiPath}`, {
+    method,
+    headers,
+    body: body ? JSON.stringify(body) : undefined,
+    signal: AbortSignal.timeout(30_000),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) {
+    const detail = result.message ?? result.error ?? `HTTP ${response.status}`;
+    throw new Error(`QikNet API request failed (${detail}).`);
+  }
+  return result;
+}
+
+async function readQikNetApiInventory() {
+  log("Reading QikNet branch inventory through the API.");
+  const result = await qiknetApiRequest("/super/dashboard");
+  const dashboard = result.data && !result.branchInventory ? result.data : result;
+  if (!Array.isArray(dashboard.branchInventory)) {
+    throw new Error("QikNet API dashboard did not include branch inventory.");
+  }
+  const records = dashboard.branchInventory.map((branch) => {
+    const groups = {};
+    for (const [label, voucherType] of Object.entries(config.voucherGroups)) {
+      const group = branch.voucherGroups?.find((entry) => entry.voucherType === voucherType);
+      const count = Number(group?.total ?? 0);
+      groups[label] = { count, status: group?.isLow ? "Low" : "Available", low: Boolean(group?.isLow) };
+    }
+    return {
+      branchCode: branch.branchCode,
+      branchName: branch.branchName,
+      totalAvailable: Number(branch.totalAvailable ?? Object.values(groups).reduce((sum, group) => sum + group.count, 0)),
+      groups,
+    };
+  });
+  if (!records.length) throw new Error("QikNet API returned no branch inventory records.");
+  return records;
+}
+
+async function uploadQikNetApiInventory(item, vouchers) {
+  if (!item.qiknetBranchCode) throw new Error(`QikNet branch code is missing for ${item.branch.qiknetName}.`);
+  const result = await qiknetApiRequest(`/super/branches/${encodeURIComponent(item.qiknetBranchCode)}/inventory/text`, {
+    method: "POST",
+    body: {
+      voucherType: config.voucherGroups[item.qiknetGroup],
+      voucherCodes: vouchers.join(","),
+    },
+  });
+  const upload = result.data && result.importedRows == null ? result.data : result;
+  const importedRows = Number(upload.importedRows);
+  if (!Number.isFinite(importedRows) || importedRows <= 0) {
+    throw new Error(`QikNet API imported ${Number.isFinite(importedRows) ? importedRows : "an unknown number of"} vouchers.`);
+  }
+  log(`QikNet API imported ${importedRows} fresh voucher(s) for ${item.branch.qiknetName} / ${item.qiknetGroup}.`);
+  return { ...upload, importedRows };
+}
+
+function delay(milliseconds) {
+  return new Promise((resolve) => setTimeout(resolve, milliseconds));
 }
 
 async function loginQikNet(page) {
@@ -327,6 +371,7 @@ function buildWorkList(inventory) {
       if (state.count < config.stockPolicy.minimum) {
         work.push({
           branch,
+          qiknetBranchCode: record.branchCode,
           qiknetGroup,
           ruijieGroup: config.voucherGroups[qiknetGroup],
           qiknetAvailable: state.count,

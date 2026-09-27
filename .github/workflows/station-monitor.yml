@@ -23,13 +23,13 @@ jobs:
     runs-on: [self-hosted, windows, x64, qiknet]
     timeout-minutes: 20
     env:
-      RUIJIE_EMAIL: ${{ secrets.RUIJIE_EMAIL }}
-      RUIJIE_PASSWORD: ${{ secrets.RUIJIE_PASSWORD }}
+      RUIJIE_API_APP_ID: ${{ secrets.RUIJIE_API_APP_ID }}
+      RUIJIE_API_SECRET: ${{ secrets.RUIJIE_API_SECRET }}
+      RUIJIE_API_BASE_URL: "https://cloud-eu.ruijienetworks.com"
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}
       DEFAULT_OUTAGE_RECIPIENTS: ${{ secrets.DEFAULT_OUTAGE_RECIPIENTS }}
       SPECIAL_OUTAGE_RECIPIENT: ${{ secrets.SPECIAL_OUTAGE_RECIPIENT }}
       SEND_SMS: ${{ github.event_name == 'schedule' && 'true' || toJSON(inputs.send_sms) }}
-      HEADLESS: "false"
       STATION_STATE_PATH: C:\qiknet-data\station-status.json
 
     steps:
@@ -43,9 +43,6 @@ jobs:
 
       - name: Install dependencies
         run: npm ci --no-audit --no-fund
-
-      - name: Install Chromium
-        run: npx playwright install chromium
 
       - name: Check station status
         run: npm run monitor
