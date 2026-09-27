@@ -11,9 +11,6 @@
     "test:sms": "node src/test-sms.mjs",
     "test:ruijie-api": "node --env-file=.env scripts/test-ruijie-api.mjs"
   },
-  "dependencies": {
-    "playwright": "1.54.2"
-  },
   "engines": {
     "node": ">=20"
   }
