@@ -23,11 +23,22 @@
     ]
   },
   "voucherGroups": {
-    "2 Hours Voucher": "QikNet2hrsVoucher",
-    "Daily Voucher": "QikNetDailyVoucher",
-    "2 Days Voucher": "QikNetBiDailyVoucher",
-    "Weekly Voucher": "QikNetWeeklyVoucher",
-    "Monthly Voucher": "QikNetMonthlyVoucher"
+    "2 Hours Voucher": {
+      "qiknetType": "QikNet2hrsVoucher",
+      "ruijieGroup": "QikNetDailyVoucher2hrs"
+    },
+    "6 Hours Voucher": {
+      "qiknetType": "QikNetDailyVoucher",
+      "ruijieGroup": "QikNetDailyVoucher6hrs"
+    },
+    "Full Day Voucher": {
+      "qiknetType": "QikNetBiDailyVoucher",
+      "ruijieGroup": "QikNetDailyVoucher"
+    },
+    "Weekly Voucher": {
+      "qiknetType": "QikNetWeeklyVoucher",
+      "ruijieGroup": "QikNetWeeklyVoucher"
+    }
   },
   "branches": [
     {
