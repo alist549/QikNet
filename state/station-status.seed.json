@@ -1,0 +1,70 @@
+{
+  "stations": {
+    "QikNet HotSpot 1: Unit L": {
+      "branchName": "Unit L",
+      "status": "up",
+      "components": [{ "name": "AP", "online": 1, "total": 1 }],
+      "alertCount": 0,
+      "lastAlertAt": null,
+      "nextAlertAt": null,
+      "cycleNotifiedRecipients": []
+    },
+    "QikNet HotSpot 2: Jambanja": {
+      "branchName": "Unit M",
+      "status": "up",
+      "components": [{ "name": "AP", "online": 1, "total": 1 }],
+      "alertCount": 0,
+      "lastAlertAt": null,
+      "nextAlertAt": null,
+      "cycleNotifiedRecipients": []
+    },
+    "QikNet HotSpot 3: Chikwanha": {
+      "branchName": "Chikwana",
+      "status": "down",
+      "components": [{ "name": "AP", "online": 0, "total": 1 }],
+      "alertCount": 5,
+      "lastAlertAt": null,
+      "nextAlertAt": "2026-10-02T10:26:50.169Z",
+      "cycleNotifiedRecipients": []
+    },
+    "QikNet HotSpot 4: Unit C": {
+      "branchName": "Unit C",
+      "status": "up",
+      "components": [
+        { "name": "AP", "online": 1, "total": 1 },
+        { "name": "Wireless Bridge", "online": 1, "total": 1 }
+      ],
+      "alertCount": 0,
+      "lastAlertAt": null,
+      "nextAlertAt": null,
+      "cycleNotifiedRecipients": []
+    },
+    "QikNet HotSpot 5: Makoni": {
+      "branchName": "Makoni",
+      "status": "up",
+      "components": [{ "name": "AP", "online": 1, "total": 1 }],
+      "alertCount": 0,
+      "lastAlertAt": null,
+      "nextAlertAt": null,
+      "cycleNotifiedRecipients": []
+    },
+    "QikNet HotSpot 6: Unit O": {
+      "branchName": "Unit O",
+      "status": "up",
+      "components": [{ "name": "AP", "online": 1, "total": 1 }],
+      "alertCount": 0,
+      "lastAlertAt": null,
+      "nextAlertAt": null,
+      "cycleNotifiedRecipients": []
+    },
+    "QikNet HotSpot 7: Unit N": {
+      "branchName": "Unit N",
+      "status": "up",
+      "components": [{ "name": "AP", "online": 1, "total": 1 }],
+      "alertCount": 0,
+      "lastAlertAt": null,
+      "nextAlertAt": null,
+      "cycleNotifiedRecipients": []
+    }
+  }
+}
