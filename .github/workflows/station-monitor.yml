@@ -13,6 +13,7 @@ on:
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: qiknet-automation
@@ -20,7 +21,7 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: [self-hosted, windows, x64, qiknet]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       RUIJIE_API_APP_ID: ${{ secrets.RUIJIE_API_APP_ID }}
@@ -30,11 +31,36 @@ jobs:
       DEFAULT_OUTAGE_RECIPIENTS: ${{ secrets.DEFAULT_OUTAGE_RECIPIENTS }}
       SPECIAL_OUTAGE_RECIPIENT: ${{ secrets.SPECIAL_OUTAGE_RECIPIENT }}
       SEND_SMS: ${{ github.event_name == 'schedule' && 'true' || toJSON(inputs.send_sms) }}
-      STATION_STATE_PATH: C:\qiknet-data\station-status.json
+      STATION_STATE_PATH: ${{ github.workspace }}/state/station-status.json
 
     steps:
-      - name: Check out automation and alert state
+      - name: Check out automation
         uses: actions/checkout@v4
+
+      - name: Restore alert state
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p state
+          artifact_url="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f name=qiknet-station-state \
+            -f per_page=1 \
+            --jq '.artifacts[0].archive_download_url // empty')"
+          if [ -n "$artifact_url" ]; then
+            curl --fail --location --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$artifact_url" \
+              --output "${RUNNER_TEMP}/qiknet-station-state.zip"
+            unzip -o "${RUNNER_TEMP}/qiknet-station-state.zip" -d state
+            echo "Restored alert state from the latest GitHub artifact."
+          elif [ -f state/station-status.seed.json ]; then
+            cp state/station-status.seed.json state/station-status.json
+            echo "Initialized alert state from the migration seed."
+          else
+            echo "No prior alert state was found; starting with an empty state."
+          fi
 
       - name: Use Node.js
         uses: actions/setup-node@v4
@@ -46,6 +72,15 @@ jobs:
 
       - name: Check station status
         run: npm run monitor
+
+      - name: Preserve alert state
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qiknet-station-state
+          path: state/station-status.json
+          if-no-files-found: error
+          retention-days: 90
 
       - name: Upload monitor report
         if: always()
