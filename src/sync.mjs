@@ -175,7 +175,7 @@ async function getQikNetToken() {
   return qiknetTokenPromise;
 }
 
-async function qiknetApiRequest(apiPath, { method = "GET", body, authenticate = true } = {}) {
+async function qiknetApiRequest(apiPath, { method = "GET", body, authenticate = true, timeoutMs = 30_000 } = {}) {
   const headers = { accept: "application/json" };
   if (body) headers["content-type"] = "application/json";
   if (authenticate) headers.authorization = `Bearer ${await getQikNetToken()}`;
@@ -183,7 +183,7 @@ async function qiknetApiRequest(apiPath, { method = "GET", body, authenticate = 
     method,
     headers,
     body: body ? JSON.stringify(body) : undefined,
-    signal: AbortSignal.timeout(30_000),
+    signal: AbortSignal.timeout(timeoutMs),
   });
   const result = await response.json().catch(() => ({}));
   if (!response.ok) {
@@ -222,6 +222,9 @@ async function uploadQikNetApiInventory(item, vouchers) {
   if (!item.qiknetBranchCode) throw new Error(`QikNet branch code is missing for ${item.branch.qiknetName}.`);
   const result = await qiknetApiRequest(`/super/branches/${encodeURIComponent(item.qiknetBranchCode)}/inventory/text`, {
     method: "POST",
+    // A 200-code import is processed synchronously by QikNet and can take
+    // longer than normal reads or authentication requests.
+    timeoutMs: 120_000,
     body: {
       voucherType: config.voucherGroups[item.qiknetGroup].qiknetType,
       voucherCodes: vouchers.join(","),
