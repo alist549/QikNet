@@ -23,13 +23,14 @@ QikNet's built-in duplicate protection remains in control: duplicate voucher cod
 
 ## Voucher group mappings
 
-| QikNet | Ruijie |
-|---|---|
-| 2 Hours Voucher | QikNet2hrsVoucher |
-| Daily Voucher | QikNetDailyVoucher |
-| 2 Days Voucher | QikNetBiDailyVoucher |
-| Weekly Voucher | QikNetWeeklyVoucher |
-| Monthly Voucher | QikNetMonthlyVoucher |
+| QikNet product | Price | QikNet API type | Ruijie user group |
+|---|---:|---|---|
+| 2 Hours Voucher | $0.25 | QikNet2hrsVoucher | QikNetDailyVoucher2hrs |
+| 6 Hours Voucher | $0.50 | QikNetDailyVoucher | QikNetDailyVoucher6hrs |
+| Full Day Voucher | $1.00 | QikNetBiDailyVoucher | QikNetDailyVoucher |
+| Weekly Voucher | $5.00 | QikNetWeeklyVoucher | QikNetWeeklyVoucher |
+
+The QikNet API type values are stable internal identifiers and may retain older wording. They are intentionally configured separately from the current product labels and Ruijie user-group names.
 
 ## Safety controls
 

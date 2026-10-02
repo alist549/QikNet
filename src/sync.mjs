@@ -202,8 +202,8 @@ async function readQikNetApiInventory() {
   }
   const records = dashboard.branchInventory.map((branch) => {
     const groups = {};
-    for (const [label, voucherType] of Object.entries(config.voucherGroups)) {
-      const group = branch.voucherGroups?.find((entry) => entry.voucherType === voucherType);
+    for (const [label, mapping] of Object.entries(config.voucherGroups)) {
+      const group = branch.voucherGroups?.find((entry) => entry.voucherType === mapping.qiknetType);
       const count = Number(group?.total ?? 0);
       groups[label] = { count, status: group?.isLow ? "Low" : "Available", low: Boolean(group?.isLow) };
     }
@@ -223,7 +223,7 @@ async function uploadQikNetApiInventory(item, vouchers) {
   const result = await qiknetApiRequest(`/super/branches/${encodeURIComponent(item.qiknetBranchCode)}/inventory/text`, {
     method: "POST",
     body: {
-      voucherType: config.voucherGroups[item.qiknetGroup],
+      voucherType: config.voucherGroups[item.qiknetGroup].qiknetType,
       voucherCodes: vouchers.join(","),
     },
   });
@@ -373,7 +373,7 @@ function buildWorkList(inventory) {
           branch,
           qiknetBranchCode: record.branchCode,
           qiknetGroup,
-          ruijieGroup: config.voucherGroups[qiknetGroup],
+          ruijieGroup: config.voucherGroups[qiknetGroup].ruijieGroup,
           qiknetAvailable: state.count,
           qiknetStatus: state.status,
           target: config.stockPolicy.target,
@@ -741,10 +741,9 @@ function verifyReplenishmentTargets(inventoryAfter) {
 function buildBranchRefillMessages() {
   const labels = {
     "2 Hours Voucher": "2Hr",
-    "Daily Voucher": "Day",
-    "2 Days Voucher": "2Day",
+    "6 Hours Voucher": "6Hr",
+    "Full Day Voucher": "Day",
     "Weekly Voucher": "Week",
-    "Monthly Voucher": "Month",
   };
   const byBranch = new Map();
   for (const action of report.actions) {
