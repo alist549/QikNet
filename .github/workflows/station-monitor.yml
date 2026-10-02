@@ -55,9 +55,6 @@ jobs:
               --output "${RUNNER_TEMP}/qiknet-station-state.zip"
             unzip -o "${RUNNER_TEMP}/qiknet-station-state.zip" -d state
             echo "Restored alert state from the latest GitHub artifact."
-          elif [ -f state/station-status.seed.json ]; then
-            cp state/station-status.seed.json state/station-status.json
-            echo "Initialized alert state from the migration seed."
           else
             echo "No prior alert state was found; starting with an empty state."
           fi
