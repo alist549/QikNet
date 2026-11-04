@@ -84,7 +84,6 @@ test("expired vouchers are not active; vouchers without an expiry are", async ()
   assert.deepEqual([...codes].sort(), ["live01", "staff1"]);
 });
 
-test("grace period: a recent sign-in counts as paid even after the voucher expired", async () => {
-  const { RULES: rules } = await import("../src/blocker.mjs");
-  assert.equal(rules.recentCustomerHours, 48);
+test("grace period is 12 hours after expiry", () => {
+  assert.equal(RULES.expiryGraceHours, 12);
 });

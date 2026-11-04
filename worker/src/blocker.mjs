@@ -10,8 +10,8 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 // A device on a portal SSID is treated as paid only when its MAC signed in on
 // the portal in the last 7 days (the longest voucher) with a voucher that is
 // still active: in use (status 2) and not past its expiry time. A device whose
-// voucher has expired counts as unpaid, unless it signed in within the last
-// 48 hours (grace period for recent customers).
+// voucher has expired counts as unpaid, unless it expired less than 12 hours
+// ago (grace period for recent customers).
 // - Never had a voucher: blocked once it has used 20 MB or is moving more than
 //   50 kbps right now (the portal alone shouldn't let it do either).
 // - Had a voucher that has now expired: blocked only if it is moving more than
@@ -30,10 +30,13 @@ export const BLOCKER_DAY_REPORT_KEY = "last-blocker-day-report";
 
 export const RULES = {
   paidWindowDays: 7,
-  // Grace period: anyone who signed in with a voucher this recently is treated
-  // as a customer even if the voucher has expired (Ruijie can take a while to
-  // cut expired vouchers off, and yesterday's customers shouldn't be blocked).
-  recentCustomerHours: 48,
+  // Grace period: a device whose voucher expired less than this long ago is
+  // still treated as a customer (Ruijie can take a while to cut expired
+  // vouchers off).
+  expiryGraceHours: 12,
+  // Most expired-voucher lookups per site per run; devices past the limit are
+  // left alone this run rather than blocked blind.
+  maxExpiryLookupsPerSite: 4,
   minDataBytes: 20 * 1024 * 1024,
   liveRateBps: 50_000,
   liveRateMinConnectedMinutes: 10,
@@ -247,12 +250,30 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   const total = Number(auth.data.result.total ?? records.length);
   if (total > records.length) throw new Error(`Voucher sign-in list was cut short (${records.length} of ${total}); skipping to be safe.`);
   const active = await activeVoucherCodes(openApi, site.groupId, now);
-  const graceSince = now.getTime() - RULES.recentCustomerHours * 3_600_000;
   const paidMacs = new Set(
-    records
-      .filter((record) => active.has(String(record.account ?? "").toLowerCase()) || Number(record.loginTimes) >= graceSince)
-      .map((record) => normaliseMac(record.userMac)),
+    records.filter((record) => active.has(String(record.account ?? "").toLowerCase())).map((record) => normaliseMac(record.userMac)),
   );
+
+  // Devices online now whose recent voucher(s) are no longer active: look up
+  // when the newest one expired, and keep them as customers inside the grace period.
+  const onlineMacs = new Set(clients.map((client) => normaliseMac(client.mac)));
+  const newestCode = new Map();
+  for (const record of records) {
+    const mac = normaliseMac(record.userMac);
+    if (paidMacs.has(mac) || !onlineMacs.has(mac)) continue;
+    const previous = newestCode.get(mac);
+    if (!previous || Number(record.loginTimes) > previous.at) newestCode.set(mac, { code: record.account, at: Number(record.loginTimes) });
+  }
+  let lookups = 0;
+  for (const [mac, { code }] of newestCode) {
+    if (lookups >= RULES.maxExpiryLookupsPerSite) {
+      paidMacs.add(mac); // not checked this run, so don't risk blocking a customer
+      continue;
+    }
+    lookups += 1;
+    const expiry = await voucherExpiry(openApi, site.groupId, code);
+    if (expiry == null || expiry > now.getTime() - RULES.expiryGraceHours * 3_600_000) paidMacs.add(mac);
+  }
 
   const expiredMacs = new Set(records.map((record) => normaliseMac(record.userMac)).filter((mac) => !paidMacs.has(mac)));
   const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked: state.blocked ?? {}, now });
@@ -339,6 +360,19 @@ async function activeVoucherCodes(openApi, groupId, now) {
   const list = result.voucherData?.list;
   if (!Array.isArray(list)) throw new Error("Active voucher list was missing; skipping this site to be safe.");
   return activeCodes(list, now);
+}
+
+// Expiry time (ms) of one voucher, or null if it has none or can't be found.
+async function voucherExpiry(openApi, groupId, code) {
+  openApi.identity ??= openApi.request("/service/api/org/account/info");
+  const identity = await openApi.identity;
+  const result = await openApi.request(
+    `/service/api/intlSamVoucher/getList/${encodeURIComponent(identity.account)}/${encodeURIComponent(groupId)}`,
+    { params: { start: 0, pageSize: 10, name: code } },
+  );
+  const voucher = (result.voucherData?.list ?? []).find((entry) => String(entry.voucherCode).toLowerCase() === String(code).toLowerCase());
+  const expiry = Number(voucher?.expiryTime);
+  return expiry > 0 ? expiry : null;
 }
 
 export function activeCodes(list, now) {
