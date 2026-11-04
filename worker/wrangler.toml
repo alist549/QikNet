@@ -4,9 +4,10 @@ compatibility_date = "2026-10-01"
 
 # Station monitor every 15 minutes, and the voucher sync at 05:30 and 17:30
 # Africa/Harare (03:30 and 15:30 UTC) with follow-ups at :38, :46 and :54.
-# Keep these strings identical to MONITOR_CRON and SYNC_CRON in src/shared.mjs.
+# Non-payer blocker every 20 minutes (BLOCKER_CRON).
+# Keep these strings identical to MONITOR_CRON, SYNC_CRON and BLOCKER_CRON in src/shared.mjs.
 [triggers]
-crons = ["*/15 * * * *", "30,38,46,54 3,15 * * *"]
+crons = ["*/15 * * * *", "30,38,46,54 3,15 * * *", "*/20 * * * *"]
 
 # Alert state and the latest run reports. Replace the id with the one printed by
 #   npx wrangler kv namespace create STATE
@@ -18,6 +19,10 @@ id = "8996ce5b02a94c9ba05d10d3d860f718"
 [vars]
 MONITOR_SEND_SMS = "true"
 SYNC_LIVE = "true"
+# Non-payer blocker: "true" adds MACs to the Wi-Fi blocklist; "false" only reports.
+BLOCKER_LIVE = "true"
+# One day-end report SMS at 00:00 Harare (no per-block SMS).
+BLOCKER_REPORT_SMS = "true"
 RUIJIE_API_BASE_URL = "https://cloud-eu.ruijienetworks.com"
 QIKNET_API_BASE_URL = "https://qiknet-backend-164518585796.us-central1.run.app/api"
 

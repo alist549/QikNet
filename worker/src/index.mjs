@@ -1,8 +1,9 @@
 import { MONITOR_REPORT_KEY, runMonitor } from "./monitor.mjs";
 import { SYNC_REPORT_KEY, runSync } from "./sync.mjs";
+import { BLOCKER_DAY_REPORT_KEY, BLOCKER_REPORT_KEY, finishBlockerDay, isHarareMidnight, runBlocker } from "./blocker.mjs";
 // Every named export of this entry module must be a Workers handler, so the
 // cron constants live in shared.mjs.
-import { MONITOR_CRON, SYNC_CRON, parseBoolean, splitList } from "./shared.mjs";
+import { BLOCKER_CRON, MONITOR_CRON, SYNC_CRON, parseBoolean, splitList } from "./shared.mjs";
 
 export default {
   async scheduled(event, env) {
@@ -21,6 +22,15 @@ export default {
       if (report.errors.length) throw new Error(`Voucher sync finished with ${report.errors.length} error(s).`);
       return;
     }
+    if (event.cron === BLOCKER_CRON) {
+      const live = parseBoolean(env.BLOCKER_LIVE, false);
+      const midnight = isHarareMidnight(new Date(event.scheduledTime));
+      // At 00:00 Harare: report on the day, release its blocks, then check again straight away.
+      if (midnight) await finishBlockerDay(env, { sendSms: parseBoolean(env.BLOCKER_REPORT_SMS, false) });
+      const report = await runBlocker(env, { live, release: midnight });
+      if (report.errors.length) throw new Error(`Blocker finished with ${report.errors.length} error(s).`);
+      return;
+    }
     console.warn(`Unrecognised cron trigger: ${event.cron}`);
   },
 
@@ -29,6 +39,7 @@ export default {
   //   POST /run/monitor?send_sms=false
   //   POST /run/sync?dry_run=true&branches=Unit%20M
   //   POST /run/sync?dry_run=false&confirm_live_upload=true
+  //   POST /run/blocker?live=false            (live=true needs BLOCKER_LIVE on)
   async fetch(request, env) {
     if (!env.MANUAL_RUN_TOKEN || !(await authorised(request, env.MANUAL_RUN_TOKEN))) {
       return json({ error: "Unauthorised." }, 401);
@@ -36,11 +47,13 @@ export default {
     const url = new URL(request.url);
 
     if (request.method === "GET" && url.pathname === "/status") {
-      const [monitor, sync] = await Promise.all([
+      const [monitor, sync, blocker, blockerDay] = await Promise.all([
         env.STATE.get(MONITOR_REPORT_KEY, "json"),
         env.STATE.get(SYNC_REPORT_KEY, "json"),
+        env.STATE.get(BLOCKER_REPORT_KEY, "json"),
+        env.STATE.get(BLOCKER_DAY_REPORT_KEY, "json"),
       ]);
-      return json({ monitor, sync });
+      return json({ monitor, sync, blocker, blockerDay });
     }
 
     if (request.method === "POST" && url.pathname === "/run/monitor") {
@@ -57,6 +70,11 @@ export default {
         branches: splitList(url.searchParams.get("branches")),
         sendHealthySms: false,
       }));
+    }
+
+    if (request.method === "POST" && url.pathname === "/run/blocker") {
+      const live = parseBoolean(url.searchParams.get("live"), false) && parseBoolean(env.BLOCKER_LIVE, false);
+      return json(await runBlocker(env, { live }));
     }
 
     return json({ error: "Not found." }, 404);
