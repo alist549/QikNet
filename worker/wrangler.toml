@@ -12,12 +12,12 @@ crons = ["*/15 * * * *", "30,38,46,54 3,15 * * *"]
 #   npx wrangler kv namespace create STATE
 [[kv_namespaces]]
 binding = "STATE"
-id = "REPLACE_WITH_KV_NAMESPACE_ID"
+id = "8996ce5b02a94c9ba05d10d3d860f718"
 
 # Both start in safe mode. Flip to "true" after a successful test run.
 [vars]
-MONITOR_SEND_SMS = "false"
-SYNC_LIVE = "false"
+MONITOR_SEND_SMS = "true"
+SYNC_LIVE = "true"
 RUIJIE_API_BASE_URL = "https://cloud-eu.ruijienetworks.com"
 QIKNET_API_BASE_URL = "https://qiknet-backend-164518585796.us-central1.run.app/api"
 
