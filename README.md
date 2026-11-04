@@ -2,8 +2,8 @@
 
 This package contains two scheduled jobs and one manual test:
 
-1. **Voucher stock sync:** Runs twice daily at 05:30 and 17:30 Africa/Harare. A voucher group is low when it has fewer than **200** available codes. The job obtains **200** matching unused vouchers from Ruijie and uploads them to QikNet, ensuring at least **200** codes are available after a refill.
-2. **Station monitor:** Runs every 15 minutes on the self-hosted Windows runner (`QikNet-VPS`). It reads device status through the Ruijie API, preserves alert history in a private GitHub Actions artifact, and sends an outage SMS when a station becomes down or degraded.
+1. **Voucher stock sync:** Runs twice daily at 05:30 and 17:30 Africa/Harare on Cloudflare Workers. A voucher group is low when it has fewer than **200** available codes. The job obtains **200** matching unused vouchers from Ruijie and uploads them to QikNet, ensuring at least **200** codes are available after a refill.
+2. **Station monitor:** Runs every 15 minutes on Cloudflare Workers. It reads device status through the Ruijie API, keeps alert history in Workers KV, and sends an outage SMS when a station becomes down or degraded.
 3. **SMS test:** A manual-only workflow sends one test message to every unique configured report and outage recipient.
 
 QikNet's built-in duplicate protection remains in control: duplicate voucher codes are skipped during import.
@@ -41,11 +41,15 @@ The QikNet API type values are stable internal identifiers and may retain older 
 - Each run writes a JSON report under `reports/`.
 - Overlapping runs are prevented by the GitHub Actions concurrency rule.
 - The monitor stores incident state and sends an SMS once per outage transition, rather than repeating the same alert every 15 minutes.
-- All workflows run on the self-hosted Windows runner (labels `self-hosted, windows, x64, qiknet`), so they use no GitHub Actions minutes. Set it up with `scripts/bootstrap-windows-runner.ps1` and keep that machine on and its user signed in.
+- Both scheduled jobs run on Cloudflare Workers' free plan (see `worker/README.md`). The GitHub Actions workflows remain for manual runs only.
 - If one device in a multi-device station goes offline, the station is reported as **degraded**.
 - SMS tokens, portal passwords, and recipient numbers are supplied as encrypted deployment secrets.
 
-## Recommended deployment: GitHub Actions
+## Scheduled deployment: Cloudflare Workers
+
+The scheduled jobs run from `worker/`. For setup, testing and go-live, see [`worker/README.md`](worker/README.md).
+
+## Manual runs: GitHub Actions
 
 1. Create a private GitHub repository and place this package at its root.
 2. In **Settings → Secrets and variables → Actions**, add these encrypted repository secrets:

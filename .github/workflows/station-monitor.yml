@@ -1,8 +1,8 @@
 name: QikNet station monitor
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
+  # Scheduled runs now happen on Cloudflare Workers (see worker/).
+  # This workflow stays available for manual runs only.
   workflow_dispatch:
     inputs:
       send_sms:
@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   monitor:
-    runs-on: [self-hosted, windows, x64, qiknet]
+    runs-on: ubuntu-latest
     timeout-minutes: 20
     env:
       RUIJIE_API_APP_ID: ${{ secrets.RUIJIE_API_APP_ID }}
@@ -38,23 +38,26 @@ jobs:
         uses: actions/checkout@v4
 
       - name: Restore alert state
-        shell: powershell
+        shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
-          New-Item -ItemType Directory -Force -Path state | Out-Null
-          $headers = @{ Authorization = "Bearer $env:GH_TOKEN"; "X-GitHub-Api-Version" = "2022-11-28" }
-          $list = Invoke-RestMethod -UseBasicParsing -Headers $headers -Uri "$env:GITHUB_API_URL/repos/$env:GITHUB_REPOSITORY/actions/artifacts?name=qiknet-station-state&per_page=1"
-          if ($list.artifacts.Count -gt 0) {
-            $zip = Join-Path $env:RUNNER_TEMP "qiknet-station-state.zip"
-            Invoke-WebRequest -UseBasicParsing -Headers $headers -Uri $list.artifacts[0].archive_download_url -OutFile $zip
-            Expand-Archive -LiteralPath $zip -DestinationPath state -Force
-            Remove-Item -LiteralPath $zip -Force
-            Write-Output "Restored alert state from the latest GitHub artifact."
-          } else {
-            Write-Output "No prior alert state was found; starting with an empty state."
-          }
+          mkdir -p state
+          artifact_url="$(gh api --method GET "repos/${GITHUB_REPOSITORY}/actions/artifacts" \
+            -f name=qiknet-station-state \
+            -f per_page=1 \
+            --jq '.artifacts[0].archive_download_url // empty')"
+          if [ -n "$artifact_url" ]; then
+            curl --fail --location --silent --show-error \
+              --header "Authorization: Bearer ${GH_TOKEN}" \
+              --header "X-GitHub-Api-Version: 2022-11-28" \
+              "$artifact_url" \
+              --output "${RUNNER_TEMP}/qiknet-station-state.zip"
+            unzip -o "${RUNNER_TEMP}/qiknet-station-state.zip" -d state
+            echo "Restored alert state from the latest GitHub artifact."
+          else
+            echo "No prior alert state was found; starting with an empty state."
+          fi
 
       - name: Use Node.js
         uses: actions/setup-node@v4

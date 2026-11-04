@@ -1,0 +1,25 @@
+name = "qiknet-automation"
+main = "src/index.mjs"
+compatibility_date = "2026-10-01"
+
+# Station monitor every 15 minutes, and the voucher sync at 05:30 and 17:30
+# Africa/Harare (03:30 and 15:30 UTC) with follow-ups at :38, :46 and :54.
+# Keep these strings identical to MONITOR_CRON and SYNC_CRON in src/shared.mjs.
+[triggers]
+crons = ["*/15 * * * *", "30,38,46,54 3,15 * * *"]
+
+# Alert state and the latest run reports. Replace the id with the one printed by
+#   npx wrangler kv namespace create STATE
+[[kv_namespaces]]
+binding = "STATE"
+id = "REPLACE_WITH_KV_NAMESPACE_ID"
+
+# Both start in safe mode. Flip to "true" after a successful test run.
+[vars]
+MONITOR_SEND_SMS = "false"
+SYNC_LIVE = "false"
+RUIJIE_API_BASE_URL = "https://cloud-eu.ruijienetworks.com"
+QIKNET_API_BASE_URL = "https://qiknet-backend-164518585796.us-central1.run.app/api"
+
+[observability]
+enabled = true

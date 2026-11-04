@@ -13,7 +13,7 @@ permissions:
 
 jobs:
   test-sms:
-    runs-on: [self-hosted, windows, x64, qiknet]
+    runs-on: ubuntu-latest
     timeout-minutes: 10
     env:
       SMSPOP_TOKEN: ${{ secrets.SMSPOP_TOKEN }}

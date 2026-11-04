@@ -1,5 +1,5 @@
 param(
-    [string]$RepositoryUrl = "https://github.com/alist549/QikNet",
+    [string]$RepositoryUrl = "https://github.com/alist549/qiknet-voucher-automation",
     [string]$RunnerName = "QikNet-VPS"
 )
 

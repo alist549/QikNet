@@ -1,0 +1,16 @@
+{
+  "name": "qiknet-automation-worker",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "QikNet station monitor and voucher sync on Cloudflare Workers cron triggers",
+  "scripts": {
+    "deploy": "wrangler deploy",
+    "logs": "wrangler tail",
+    "check": "wrangler deploy --dry-run --outdir dist",
+    "test": "node --test test/*.test.mjs"
+  },
+  "devDependencies": {
+    "wrangler": "4.151.2"
+  }
+}
