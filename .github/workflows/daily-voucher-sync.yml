@@ -1,9 +1,8 @@
 name: Daily QikNet voucher sync
 
 on:
-  schedule:
-    # 05:30 and 17:30 Africa/Harare (UTC+2)
-    - cron: "30 3,15 * * *"
+  # Scheduled runs now happen on Cloudflare Workers (see worker/).
+  # This workflow stays available for manual runs only.
   workflow_dispatch:
     inputs:
       dry_run:

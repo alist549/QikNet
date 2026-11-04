@@ -1,8 +1,8 @@
 name: QikNet station monitor
 
 on:
-  schedule:
-    - cron: "*/15 * * * *"
+  # Scheduled runs now happen on Cloudflare Workers (see worker/).
+  # This workflow stays available for manual runs only.
   workflow_dispatch:
     inputs:
       send_sms:

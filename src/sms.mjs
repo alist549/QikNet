@@ -10,6 +10,8 @@ export async function sendSmsCampaign({
   campaignName,
   retries = DEFAULT_RETRIES,
   timeoutMs = DEFAULT_TIMEOUT_MS,
+  retryDelayMs = 5_000,
+  fetchImpl = fetch,
 }) {
   if (!token) throw new Error("SMSPOP_TOKEN is missing.");
   if (!/^263\d{9}$/.test(recipient)) throw new Error(`Invalid Zimbabwe SMS recipient: ${maskPhone(recipient)}`);
@@ -27,7 +29,7 @@ export async function sendSmsCampaign({
 
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     try {
-      const response = await fetch(campaignUrl, {
+      const response = await fetchImpl(campaignUrl, {
         method: "POST",
         headers: {
           Authorization: `Bearer ${token}`,
@@ -55,7 +57,7 @@ export async function sendSmsCampaign({
       return { recipient: maskPhone(recipient), status: response.status, result };
     } catch (error) {
       lastError = error;
-      if (attempt < retries) await delay(5_000);
+      if (attempt < retries) await delay(retryDelayMs);
     }
   }
 
