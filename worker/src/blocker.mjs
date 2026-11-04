@@ -10,7 +10,8 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 // A device on a portal SSID is treated as paid only when its MAC signed in on
 // the portal in the last 7 days (the longest voucher) with a voucher that is
 // still active: in use (status 2) and not past its expiry time. A device whose
-// voucher has expired counts as unpaid.
+// voucher has expired counts as unpaid, unless it signed in within the last
+// 48 hours (grace period for recent customers).
 // - Never had a voucher: blocked once it has used 20 MB or is moving more than
 //   50 kbps right now (the portal alone shouldn't let it do either).
 // - Had a voucher that has now expired: blocked only if it is moving more than
@@ -29,6 +30,10 @@ export const BLOCKER_DAY_REPORT_KEY = "last-blocker-day-report";
 
 export const RULES = {
   paidWindowDays: 7,
+  // Grace period: anyone who signed in with a voucher this recently is treated
+  // as a customer even if the voucher has expired (Ruijie can take a while to
+  // cut expired vouchers off, and yesterday's customers shouldn't be blocked).
+  recentCustomerHours: 48,
   minDataBytes: 20 * 1024 * 1024,
   liveRateBps: 50_000,
   liveRateMinConnectedMinutes: 10,
@@ -242,8 +247,11 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   const total = Number(auth.data.result.total ?? records.length);
   if (total > records.length) throw new Error(`Voucher sign-in list was cut short (${records.length} of ${total}); skipping to be safe.`);
   const active = await activeVoucherCodes(openApi, site.groupId, now);
+  const graceSince = now.getTime() - RULES.recentCustomerHours * 3_600_000;
   const paidMacs = new Set(
-    records.filter((record) => active.has(String(record.account ?? "").toLowerCase())).map((record) => normaliseMac(record.userMac)),
+    records
+      .filter((record) => active.has(String(record.account ?? "").toLowerCase()) || Number(record.loginTimes) >= graceSince)
+      .map((record) => normaliseMac(record.userMac)),
   );
 
   const expiredMacs = new Set(records.map((record) => normaliseMac(record.userMac)).filter((mac) => !paidMacs.has(mac)));
