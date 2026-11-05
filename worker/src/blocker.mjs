@@ -5,7 +5,7 @@ import { createRuijieClient } from "./ruijie.mjs";
 import { createBudget, formatError, log, requiredEnv, splitList } from "./shared.mjs";
 
 // Blocks devices that use the hotspot without paying, through the Ruijie web
-// console's per-site Wi-Fi blocklist. Runs every 20 minutes.
+// console's per-site Wi-Fi blocklist. Runs every 5 minutes.
 //
 // A device on a portal SSID is treated as paid only when its MAC signed in on
 // the portal in the last 7 days (the longest voucher) with a voucher that is
@@ -72,7 +72,18 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
       baseUrl: env.RUIJIE_API_BASE_URL,
       fetchImpl: budget.fetch,
     });
-    await ruijie.login();
+    // Reuse the console session between runs so the job doesn't sign in every
+    // 5 minutes; sign in again only when the session has expired.
+    if (state.session?.cookies) ruijie.importCookies(state.session.cookies);
+    else await ruijie.login();
+    try {
+      await ruijie.ensureSession();
+    } catch (error) {
+      if (!error.sessionExpired) throw error;
+      ruijie.cookies.clear();
+      await ruijie.login();
+    }
+    if (ruijie.loggedInThisRun) state.session = { cookies: ruijie.exportCookies(), at: now().toISOString() };
     const openApi = createRuijieClient({
       baseUrl: env.RUIJIE_API_BASE_URL,
       appId: requiredEnv(env, "RUIJIE_API_APP_ID"),
@@ -113,7 +124,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
     }
 
     // 2. Check every site.
-    const sites = await listSites(ruijie);
+    const sites = ruijie.sites ?? (await listSites(ruijie));
     for (const site of sites) {
       if (budget.remaining() < 5) {
         report.errors.push({ site: site.name, message: "Skipped: out of request budget for this run." });
@@ -151,8 +162,10 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
   if (report.errors.length) state.day.errors += report.errors.length;
 
   report.subrequests = budget.used;
+  // One KV write per run (the free plan allows 1,000 writes a day): the latest
+  // report and the console session live inside the state record.
+  state.lastReport = report;
   await env.STATE.put(BLOCKER_STATE_KEY, JSON.stringify(state));
-  await env.STATE.put(BLOCKER_REPORT_KEY, JSON.stringify(report));
   log(`Blocker: ${report.blocked.length} blocked, ${report.wouldBlock.length} would block, ${report.released.length} released, ${report.errors.length} error(s), ${budget.used} requests.`);
   return report;
 }
@@ -207,7 +220,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
   return summary;
 }
 
-async function listSites(ruijie) {
+export async function listSites(ruijie) {
   const result = await ruijie.api("/maint/network/common/list?page_index=1&page_size=100", { querys: { version: 1 } });
   if (result.code !== 0) throw new Error(`Project list failed: ${result.msg}`);
   return (result.dataList ?? []).map((project) => ({
