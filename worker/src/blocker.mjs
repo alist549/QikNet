@@ -12,7 +12,7 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 // still active: in use (status 2) and not past its expiry time. A device whose
 // voucher has expired counts as unpaid, unless it expired less than 12 hours
 // ago (grace period for recent customers).
-// - Never had a voucher: blocked once it has used 20 MB or is moving more than
+// - Never had a voucher: blocked once it has used 10 MB or is moving more than
 //   50 kbps right now (the portal alone shouldn't let it do either).
 // - Had a voucher that has now expired: blocked only if it is moving more than
 //   50 kbps right now. Its data counter includes time it paid for, and a device
@@ -37,7 +37,7 @@ export const RULES = {
   // Most expired-voucher lookups per site per run; devices past the limit are
   // left alone this run rather than blocked blind.
   maxExpiryLookupsPerSite: 4,
-  minDataBytes: 20 * 1024 * 1024,
+  minDataBytes: 10 * 1024 * 1024,
   liveRateBps: 50_000,
   liveRateMinConnectedMinutes: 10,
   maxPasswordDevices: 2,
