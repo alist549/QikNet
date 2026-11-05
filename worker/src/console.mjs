@@ -19,7 +19,32 @@ export class RuijieConsole {
     this.cookies = new Map();
   }
 
+  importCookies(cookies) {
+    for (const [name, value] of Object.entries(cookies ?? {})) this.cookies.set(name, value);
+  }
+
+  exportCookies() {
+    return Object.fromEntries(this.cookies);
+  }
+
+  // Cheap authenticated call that also loads the project list. Throws an error
+  // with sessionExpired = true when the stored session is no longer valid.
+  async ensureSession() {
+    const result = await this.api("/maint/network/common/list?page_index=1&page_size=100", { querys: { version: 1 } });
+    if (result.code !== 0) {
+      const error = new Error(`Ruijie console session check failed: ${result.msg ?? result.code}`);
+      error.sessionExpired = true;
+      throw error;
+    }
+    this.sites = (result.dataList ?? []).map((project) => ({
+      groupId: project.buildingId,
+      name: String(project.name).replace(/^QikNet HotSpot \d+:\s*/i, ""),
+      online: Number(project.onCount ?? 0) > 0,
+    }));
+  }
+
   async login() {
+    this.loggedInThisRun = true;
     const service = `${this.baseUrl}/webproxy/sso/back?rewrite=off&back=${encodeURIComponent(`${this.baseUrl}/macc5/adminIntl/`)}`;
     const loginUrl = `${this.baseUrl}/sso/login?service=${encodeURIComponent(service)}`;
 
@@ -74,7 +99,11 @@ export class RuijieConsole {
       headers: { "content-type": "application/json", referer: `${this.baseUrl}/macc5/adminIntl/` },
       body: JSON.stringify(payload),
     });
-    if (!response.ok) throw new Error(`Ruijie console ${method} ${api} returned HTTP ${response.status}.`);
+    if (!response.ok || !(response.headers.get("content-type") ?? "").includes("json")) {
+      const error = new Error(`Ruijie console ${method} ${api} returned HTTP ${response.status}.`);
+      error.sessionExpired = [301, 302, 401, 403].includes(response.status) || response.ok;
+      throw error;
+    }
     return response.json();
   }
 

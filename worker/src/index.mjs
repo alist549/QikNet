@@ -1,6 +1,6 @@
 import { MONITOR_REPORT_KEY, runMonitor } from "./monitor.mjs";
 import { SYNC_REPORT_KEY, runSync } from "./sync.mjs";
-import { BLOCKER_DAY_REPORT_KEY, BLOCKER_REPORT_KEY, finishBlockerDay, isHarareMidnight, runBlocker } from "./blocker.mjs";
+import { BLOCKER_DAY_REPORT_KEY, BLOCKER_STATE_KEY, finishBlockerDay, isHarareMidnight, runBlocker } from "./blocker.mjs";
 // Every named export of this entry module must be a Workers handler, so the
 // cron constants live in shared.mjs.
 import { BLOCKER_CRON, MONITOR_CRON, SYNC_CRON, parseBoolean, splitList } from "./shared.mjs";
@@ -50,7 +50,7 @@ export default {
       const [monitor, sync, blocker, blockerDay] = await Promise.all([
         env.STATE.get(MONITOR_REPORT_KEY, "json"),
         env.STATE.get(SYNC_REPORT_KEY, "json"),
-        env.STATE.get(BLOCKER_REPORT_KEY, "json"),
+        env.STATE.get(BLOCKER_STATE_KEY, "json").then((state) => state?.lastReport ?? null),
         env.STATE.get(BLOCKER_DAY_REPORT_KEY, "json"),
       ]);
       return json({ monitor, sync, blocker, blockerDay });

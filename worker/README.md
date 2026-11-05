@@ -100,7 +100,7 @@ The GitHub Actions workflows remain for manual runs only. Their schedules are of
 
 ## Non-payer blocker
 
-`src/blocker.mjs` runs every 20 minutes (`*/20 * * * *`). It signs in to the Ruijie web console (`src/console.mjs`, needs the `RUIJIE_WEB_USER` and `RUIJIE_WEB_PASSWORD` secrets) and, for each site:
+`src/blocker.mjs` runs every 5 minutes (`*/5 * * * *`), reusing its console session between runs. It signs in to the Ruijie web console (`src/console.mjs`, needs the `RUIJIE_WEB_USER` and `RUIJIE_WEB_PASSWORD` secrets) and, for each site:
 
 - counts a device on a portal SSID as **paid** only if its MAC signed in within the last 7 days with a voucher that is still active (status 2 and not past its expiry), or its voucher expired less than 12 hours ago (grace period);
 - blocks an unpaid device that never had a voucher once it has used 20 MB or is moving more than 50 kbps;
