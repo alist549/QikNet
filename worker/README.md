@@ -4,7 +4,7 @@ This Worker runs the station monitor and the voucher sync on Cloudflare's free p
 
 | Job | Schedule | What it does |
 |---|---|---|
-| Station monitor | Every 15 minutes | Reads device status from the Ruijie API, keeps incident state in Workers KV, and sends tiered outage SMS alerts. |
+| Station monitor | Every 15 minutes | Reads device status from the Ruijie API, keeps incident state in Workers KV, and sends one DOWN and one BACK UP SMS per outage (see Station alerts below). |
 | Voucher sync | 05:30 and 17:30 Africa/Harare, with follow-ups at :38, :46 and :54 | Refills any voucher group below 200 with fresh Ruijie codes and uploads them to QikNet. |
 
 Each Worker run on the free plan can make at most 50 outbound requests. The sync handles one voucher group at a time: it creates the codes and uploads them before moving to the next group. When the request limit gets close, the run stops and leaves the remaining groups for the follow-up runs. A normal refill finishes in the first run. Refilling every group in every branch (28 in all) takes four runs.
@@ -109,3 +109,13 @@ The GitHub Actions workflows remain for manual runs only. Their schedules are of
 - skips a site if any lookup fails or more than 12 devices would be blocked at once.
 
 The 22:00 UTC run (00:00 Africa/Harare) sends one day-end SMS report (`BLOCKER_REPORT_SMS`, to `BLOCKER_REPORT_RECIPIENT` or else `STOCK_REPORT_RECIPIENT`), releases every MAC this job blocked, then checks again straight away. MACs blocked by hand are never touched. `BLOCKER_ALLOW_MACS` (comma-separated) is never blocked. `BLOCKER_LIVE = "false"` makes it report only. Manual run: `POST /run/blocker?live=false`.
+
+## Station alerts
+
+To keep SMS down, the monitor follows these rules (set in `[vars]` in `wrangler.toml`):
+
+- A station must fail `MONITOR_CONFIRM_CHECKS` checks in a row (default 2, so 30 minutes) before anyone gets an SMS. Blips that clear before then send nothing.
+- Each outage gets one DOWN SMS and, after the same number of good checks, one BACK UP SMS with how long it was down. It doesn't send repeat reminders, and a station flipping between down and degraded counts as the same outage.
+- From 22:00 to 07:00 Harare (`MONITOR_QUIET_HOURS = "22-7"`) nothing is sent. At 07:00 (`MONITOR_SUMMARY_HOUR = "7"`) each person gets one SMS listing the stations still down and the ones that came back overnight. The summary repeats every morning while a station stays down.
+
+Set `MONITOR_QUIET_HOURS = ""` to alert at night, or `MONITOR_SUMMARY_HOUR = ""` to drop the morning summary.

@@ -130,22 +130,141 @@ test("monitor reads every station, stays within the free-plan limit, and stays s
   assert.ok(env.STATE.store.has(STATE_KEY));
 });
 
-test("monitor alerts once per cycle for a down station and keeps state in KV", async () => {
-  const env = baseEnv();
-  const apis = fakeApis({ downProject: "QikNet HotSpot 2: Jambanja" });
-  const start = new Date("2026-11-04T10:00:00Z");
+const QUIET = { MONITOR_CONFIRM_CHECKS: "2", MONITOR_QUIET_HOURS: "22-7", MONITOR_SUMMARY_HOUR: "7" };
+const at = (iso) => () => new Date(iso);
 
-  const first = await runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: () => start });
+// Station state is driven by a mutable "down" project so one env can play out an outage.
+function outageApis() {
+  const holder = { down: null };
+  const apis = fakeApis({});
+  const base = apis.fetchImpl;
+  apis.setDown = (project) => (holder.down = project);
+  apis.fetchImpl = async (input, init) => {
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/maint/devices") && holder.down) {
+      const groupIds = new Map(enabled.map((branch, index) => [String(1000 + index), branch.ruijieProject]));
+      const project = groupIds.get(url.searchParams.get("group_id"));
+      const type = url.searchParams.get("common_type");
+      if (type === "BRIDGE") return new Response(JSON.stringify({ code: 0, deviceList: [] }));
+      const status = project === holder.down && type === "AP" ? "OFF" : "ON";
+      return new Response(JSON.stringify({ code: 0, deviceList: [{ onlineStatus: status }, { onlineStatus: status }] }));
+    }
+    return base(input, init);
+  };
+  return apis;
+}
+
+test("monitor waits for two failed checks, sends one DOWN and one BACK UP per outage", async () => {
+  const env = baseEnv(QUIET);
+  const apis = outageApis();
+  const run = (iso) => runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at(iso) });
+  apis.setDown("QikNet HotSpot 1: Unit L"); // Unit L: two default recipients only
+
+  const first = await run("2026-11-05T08:00:00Z"); // 10:00 Harare
   assert.deepEqual(first.errors, []);
-  // Unit M is a special branch: two default recipients plus the special one.
+  assert.equal(apis.sms.length, 0, "a single failed check is not an outage yet");
+
+  await run("2026-11-05T08:15:00Z");
+  assert.equal(apis.sms.length, 2);
+  assert.match(apis.sms[0].message, /Unit L is DOWN \(AP 0\/2\) since 5 Nov 10:00/);
+
+  for (const time of ["08:30", "09:30", "11:00", "13:00"]) await run(`2026-11-05T${time}:00Z`);
+  assert.equal(apis.sms.length, 2, "no repeat reminders while it stays down");
+
+  apis.setDown(null);
+  await run("2026-11-05T13:15:00Z");
+  assert.equal(apis.sms.length, 2, "one good check is not a recovery yet");
+  apis.setDown("QikNet HotSpot 1: Unit L");
+  await run("2026-11-05T13:30:00Z");
+  assert.equal(apis.sms.length, 2, "a flap does not start a new outage");
+  apis.setDown(null);
+  await run("2026-11-05T13:45:00Z");
+  await run("2026-11-05T14:00:00Z");
+  assert.equal(apis.sms.length, 4);
+  assert.match(apis.sms[2].message, /Unit L is BACK UP after 6h 0m/);
+  await run("2026-11-05T14:15:00Z");
+  assert.equal(apis.sms.length, 4);
+});
+
+test("a blip that recovers before it is confirmed sends nothing", async () => {
+  const env = baseEnv(QUIET);
+  const apis = outageApis();
+  const run = (iso) => runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at(iso) });
+  apis.setDown("QikNet HotSpot 1: Unit L");
+  await run("2026-11-05T08:00:00Z");
+  apis.setDown(null);
+  await run("2026-11-05T08:15:00Z");
+  await run("2026-11-05T08:30:00Z");
+  assert.equal(apis.sms.length, 0);
+});
+
+test("quiet hours hold alerts for the morning summary, which repeats daily while still down", async () => {
+  const env = baseEnv(QUIET);
+  const apis = outageApis();
+  const run = (iso) => runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at(iso) });
+  apis.setDown("QikNet HotSpot 2: Jambanja"); // Unit M: defaults + special recipient
+
+  await run("2026-11-04T21:00:00Z"); // 23:00 Harare
+  await run("2026-11-04T21:15:00Z");
+  await run("2026-11-05T03:00:00Z"); // 05:00
+  assert.equal(apis.sms.length, 0, "quiet overnight");
+
+  const morning = await run("2026-11-05T05:00:00Z"); // 07:00 Harare
+  assert.equal(morning.summarySent, true);
+  assert.equal(apis.sms.length, 3, "one summary per recipient, no separate DOWN SMS");
+  assert.match(apis.sms[0].message, /morning check .*still DOWN: Unit M since 4 Nov 23:00/);
+
+  await run("2026-11-05T05:15:00Z");
+  await run("2026-11-05T10:00:00Z");
   assert.equal(apis.sms.length, 3);
-  assert.match(apis.sms[0].message, /Unit M is DOWN \(AP 0\/2\)/);
 
-  const again = await runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: () => new Date("2026-11-04T10:15:00Z") });
-  assert.equal(again.notifications.length, 0, "no repeat inside the 60-minute window");
+  await run("2026-11-06T05:00:00Z");
+  assert.equal(apis.sms.length, 6, "next morning's summary is the daily reminder");
+});
 
-  const later = await runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: () => new Date("2026-11-04T11:01:00Z") });
-  assert.equal(later.notifications.length, 3, "repeats once the next alert is due");
+test("an outage that ends overnight is reported in the morning summary", async () => {
+  const env = baseEnv(QUIET);
+  const apis = outageApis();
+  const run = (iso) => runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at(iso) });
+  apis.setDown("QikNet HotSpot 1: Unit L");
+  await run("2026-11-04T18:00:00Z"); // 20:00 Harare
+  await run("2026-11-04T18:15:00Z");
+  assert.equal(apis.sms.length, 2);
+  apis.setDown(null);
+  await run("2026-11-04T21:00:00Z"); // 23:00, quiet
+  await run("2026-11-04T21:15:00Z");
+  assert.equal(apis.sms.length, 2, "no BACK UP in quiet hours");
+  await run("2026-11-05T05:00:00Z");
+  assert.equal(apis.sms.length, 4);
+  assert.match(apis.sms[2].message, /all stations up\. Back up overnight: Unit L\./);
+});
+
+test("without quiet hours or a summary, alerts go out at night too", async () => {
+  const env = baseEnv({ MONITOR_CONFIRM_CHECKS: "2", MONITOR_QUIET_HOURS: "", MONITOR_SUMMARY_HOUR: "" });
+  const apis = outageApis();
+  const run = (iso) => runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at(iso) });
+  apis.setDown("QikNet HotSpot 1: Unit L");
+  await run("2026-11-04T21:00:00Z");
+  await run("2026-11-04T21:15:00Z");
+  assert.equal(apis.sms.length, 2);
+  await run("2026-11-05T05:00:00Z");
+  assert.equal(apis.sms.length, 2, "no summary");
+});
+
+test("old tiered-reminder state is migrated without re-announcing a known outage", async () => {
+  const env = baseEnv(QUIET);
+  const apis = outageApis();
+  apis.setDown("QikNet HotSpot 5: Makoni");
+  const project = "QikNet HotSpot 5: Makoni";
+  await env.STATE.put(STATE_KEY, JSON.stringify({
+    stations: {
+      [project]: { branchName: "Makoni", status: "down", alertCount: 7, cycleNotifiedRecipients: [], nextAlertAt: "2026-11-05T13:15:00Z" },
+    },
+  }));
+  await runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at("2026-11-05T10:00:00Z") });
+  assert.equal(apis.sms.length, 0);
+  const state = JSON.parse(env.STATE.store.get(STATE_KEY));
+  assert.equal(state.stations[project].incident.confirmed, true);
 });
 
 test("monitor with SMS off never calls SMSPop", async () => {

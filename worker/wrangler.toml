@@ -19,6 +19,13 @@ id = "8996ce5b02a94c9ba05d10d3d860f718"
 [vars]
 MONITOR_SEND_SMS = "true"
 SYNC_LIVE = "true"
+# Station alerts: a station must fail this many 15-minute checks in a row before
+# a DOWN SMS (and pass this many before the BACK UP SMS). One of each per outage.
+MONITOR_CONFIRM_CHECKS = "2"
+# Harare hours with no DOWN/BACK UP SMS ("" = none). Night events go in the summary.
+MONITOR_QUIET_HOURS = "22-7"
+# Harare hour of the daily SMS listing stations still down ("" = no summary).
+MONITOR_SUMMARY_HOUR = "7"
 # Non-payer blocker: "true" adds MACs to the Wi-Fi blocklist; "false" only reports.
 BLOCKER_LIVE = "true"
 # One day-end report SMS at 00:00 Harare (no per-block SMS).
