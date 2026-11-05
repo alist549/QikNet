@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideTargets, isHarareMidnight, normaliseMac, RULES } from "../src/blocker.mjs";
+import { decideTargets, isHarareMidnight, normaliseMac, RULES, shouldKick } from "../src/blocker.mjs";
 import { rsaEncrypt } from "../src/console.mjs";
 
 const now = new Date("2026-11-04T20:00:00Z");
@@ -86,4 +86,15 @@ test("expired vouchers are not active; vouchers without an expiry are", async ()
 
 test("grace period is 12 hours after expiry", () => {
   assert.equal(RULES.expiryGraceHours, 12);
+});
+
+test("kicks a sign-in still online an hour or more after its voucher expired", () => {
+  const now = new Date("2026-11-05T17:00:00Z");
+  const hoursAgo = (h) => now.getTime() - h * 3_600_000;
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(1.5), now), true);
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(20), now), true);
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(0.5), now), false);
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(-2), now), false);
+  assert.equal(shouldKick({ onlineStatus: 0 }, hoursAgo(3), now), false);
+  assert.equal(shouldKick({ onlineStatus: 1 }, null, now), false);
 });

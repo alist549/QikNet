@@ -18,6 +18,10 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 //   50 kbps right now. Its data counter includes time it paid for, and a device
 //   that is just sitting on the portal must still be able to buy a new voucher.
 //
+// A portal sign-in still shown online 1 hour or more after its voucher expired
+// is kicked off (the console's "Kick Offline"), so the device must enter a new
+// voucher. Kicking only ends the portal session; it doesn't block the device.
+//
 // On SSIDs without the portal (password networks such as QikCam), at most
 // MAX_PASSWORD_DEVICES devices are allowed; newer extra devices are blocked.
 //
@@ -34,6 +38,10 @@ export const RULES = {
   // still treated as a customer (Ruijie can take a while to cut expired
   // vouchers off).
   expiryGraceHours: 12,
+  // A portal sign-in that is still online this long after its voucher expired
+  // is kicked off, so the device has to enter a new voucher to get back on.
+  kickAfterExpiryHours: 1,
+  maxKicksPerSitePerRun: 5,
   // Most expired-voucher lookups per site per run; devices past the limit are
   // left alone this run rather than blocked blind.
   maxExpiryLookupsPerSite: 4,
@@ -56,6 +64,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
     checkedAt: startedAt.toISOString(),
     live,
     released: [],
+    kicked: [],
     blocked: [],
     wouldBlock: [],
     sites: [],
@@ -133,6 +142,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
       try {
         const summary = await checkSite(ruijie, openApi, site, { state, allowList, now: startedAt });
         report.sites.push(summary.site);
+        await kickExpired(ruijie, summary.kicks, { live, report, budget });
         const targets = summary.targets;
         if (!targets.length) continue;
         if (!live) {
@@ -158,6 +168,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
 
   // Keep a running tally for the day-end report.
   state.day.blocked.push(...report.blocked.map(({ site, mac, reason, ssid }) => ({ site, mac, reason, ssid, at: report.checkedAt })));
+  state.day.kicked = (state.day.kicked ?? 0) + report.kicked.filter((kick) => !kick.dryRun).length;
   state.day.runs += 1;
   if (report.errors.length) state.day.errors += report.errors.length;
 
@@ -166,7 +177,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
   // report and the console session live inside the state record.
   state.lastReport = report;
   await env.STATE.put(BLOCKER_STATE_KEY, JSON.stringify(state));
-  log(`Blocker: ${report.blocked.length} blocked, ${report.wouldBlock.length} would block, ${report.released.length} released, ${report.errors.length} error(s), ${budget.used} requests.`);
+  log(`Blocker: ${report.kicked.length} kicked, ${report.blocked.length} blocked, ${report.wouldBlock.length} would block, ${report.released.length} released, ${report.errors.length} error(s), ${budget.used} requests.`);
   return report;
 }
 
@@ -180,6 +191,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     day: day.date,
     finishedAt: now().toISOString(),
     totalBlocked: day.blocked.length,
+    totalKicked: day.kicked ?? 0,
     bySite,
     runs: day.runs,
     errors: day.errors,
@@ -190,6 +202,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     `QikNet blocker report ${day.date}`,
     `Non-paying devices blocked: ${day.blocked.length}`,
     ...(lines.length ? lines : ["No devices blocked."]),
+    day.kicked ? `Expired vouchers kicked off the portal: ${day.kicked}` : null,
     day.errors ? `Errors during the day: ${day.errors}` : null,
     "All blocks released at 00:00.",
   ].filter(Boolean).join("\n");
@@ -275,10 +288,11 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
     const mac = normaliseMac(record.userMac);
     if (paidMacs.has(mac) || !onlineMacs.has(mac)) continue;
     const previous = newestCode.get(mac);
-    if (!previous || Number(record.loginTimes) > previous.at) newestCode.set(mac, { code: record.account, at: Number(record.loginTimes) });
+    if (!previous || Number(record.loginTimes) > previous.at) newestCode.set(mac, { code: record.account, at: Number(record.loginTimes), record });
   }
   let lookups = 0;
-  for (const [mac, { code }] of newestCode) {
+  const kicks = [];
+  for (const [mac, { code, record }] of newestCode) {
     if (lookups >= RULES.maxExpiryLookupsPerSite) {
       paidMacs.add(mac); // not checked this run, so don't risk blocking a customer
       continue;
@@ -286,6 +300,9 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
     lookups += 1;
     const expiry = await voucherExpiry(openApi, site.groupId, code);
     if (expiry == null || expiry > now.getTime() - RULES.expiryGraceHours * 3_600_000) paidMacs.add(mac);
+    if (shouldKick(record, expiry, now) && kicks.length < RULES.maxKicksPerSitePerRun) {
+      kicks.push({ site: site.name, groupId: site.groupId, mac, code, expiredHoursAgo: Math.round(((now.getTime() - expiry) / 3_600_000) * 10) / 10, record });
+    }
   }
 
   const expiredMacs = new Set(records.map((record) => normaliseMac(record.userMac)).filter((mac) => !paidMacs.has(mac)));
@@ -294,7 +311,38 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   if (decision.targets.length > RULES.maxBlocksPerSitePerRun) {
     throw new Error(`${decision.targets.length} devices to block is above the safety limit of ${RULES.maxBlocksPerSitePerRun}; nothing blocked at this site.`);
   }
-  return { site: summary, targets: decision.targets };
+  summary.toKick = kicks.length;
+  return { site: summary, targets: decision.targets, kicks };
+}
+
+// A sign-in should be kicked when the portal still shows it online although its
+// voucher expired at least kickAfterExpiryHours ago.
+export function shouldKick(record, expiry, now) {
+  if (Number(record?.onlineStatus) !== 1 || !(expiry > 0)) return false;
+  return now.getTime() - expiry >= RULES.kickAfterExpiryHours * 3_600_000;
+}
+
+// Ends portal sessions whose voucher has expired, the same as the console's
+// "Kick Offline" button. The device stays connected to the Wi-Fi but has to
+// enter a new voucher on the portal.
+async function kickExpired(ruijie, kicks, { live, report, budget }) {
+  for (const { record, ...kick } of kicks ?? []) {
+    if (!live) {
+      report.kicked.push({ ...kick, dryRun: true });
+      continue;
+    }
+    if (budget.remaining() < 5) break;
+    try {
+      const result = await ruijie.api("/samTransfer/kick/user/offline", {
+        method: "POST",
+        params: { group_id: kick.groupId, account: record.account, auth_type: record.authType, mac: record.userMac, id: record.id },
+      });
+      if (result.code !== 0) throw new Error(result.msg ?? `code ${result.code}`);
+      report.kicked.push(kick);
+    } catch (error) {
+      report.errors.push({ site: kick.site, mac: kick.mac, message: `Kick failed: ${formatError(error)}` });
+    }
+  }
 }
 
 // Pure decision logic, kept separate so it can be tested.
