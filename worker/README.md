@@ -4,7 +4,7 @@ This Worker runs the station monitor and the voucher sync on Cloudflare's free p
 
 | Job | Schedule | What it does |
 |---|---|---|
-| Station monitor | Every 15 minutes | Reads device status from the Ruijie API, keeps incident state in Workers KV, and sends tiered outage SMS alerts. |
+| Station monitor | Every 30 minutes (:07 and :37) | Reads device status from the Ruijie API using as few requests as it can, keeps incident state in Workers KV, and sends one DOWN and one BACK UP SMS per outage (see Station alerts below). |
 | Voucher sync | 05:30 and 17:30 Africa/Harare, with follow-ups at :38, :46 and :54 | Refills any voucher group below 200 with fresh Ruijie codes and uploads them to QikNet. |
 
 Each Worker run on the free plan can make at most 50 outbound requests. The sync handles one voucher group at a time: it creates the codes and uploads them before moving to the next group. When the request limit gets close, the run stops and leaves the remaining groups for the follow-up runs. A normal refill finishes in the first run. Refilling every group in every branch (28 in all) takes four runs.
@@ -97,3 +97,27 @@ Alert history starts empty on the Worker. If a station is already down when you 
 - **Tests:** `npm test` runs the Worker against fake QikNet, Ruijie and SMSPop APIs.
 
 The GitHub Actions workflows remain for manual runs only. Their schedules are off, so jobs never run in both places.
+
+## Non-payer blocker
+
+`src/blocker.mjs` runs every 5 minutes (`*/5 * * * *`), reusing its console session between runs. It signs in to the Ruijie web console (`src/console.mjs`, needs the `RUIJIE_WEB_USER` and `RUIJIE_WEB_PASSWORD` secrets) and, for each site:
+
+- counts a device on a portal SSID as **paid** only if its MAC signed in within the last 7 days with a voucher that is still active (status 2 and not past its expiry), or its voucher expired less than 12 hours ago (grace period);
+- blocks an unpaid device that never had a voucher once it has used 10 MB or is moving more than 50 kbps;
+- blocks a device whose voucher expired only while it is moving more than 50 kbps (so it can still reach the portal to buy again);
+- on password SSIDs without the portal (QikCam, VIP2), keeps the two oldest devices and blocks extras;
+- skips a site if any lookup fails or more than 12 devices would be blocked at once.
+
+The 22:00 UTC run (00:00 Africa/Harare) sends one day-end SMS report (`BLOCKER_REPORT_SMS`, to `BLOCKER_REPORT_RECIPIENT` or else `STOCK_REPORT_RECIPIENT`), and every run lifts blocks whose time is up: 12 hours for a first offence, 24 for the second, 48 for the third and 72 from then on (counts kept per MAC for 30 days). Each run reads the real console blocklist and re-blocks anyone who has been removed from it. MACs blocked by hand are never touched. `BLOCKER_ALLOW_MACS` (comma-separated) is never blocked. `BLOCKER_LIVE = "false"` makes it report only. Manual run: `POST /run/blocker?live=false`.
+
+## Station alerts
+
+To keep SMS down, the monitor follows these rules (set in `[vars]` in `wrangler.toml`):
+
+- A station must fail `MONITOR_CONFIRM_CHECKS` checks in a row (default 2, so 30 to 60 minutes) before anyone gets an SMS. Blips that clear before then send nothing.
+- Each outage gets one DOWN SMS and, after the same number of good checks, one BACK UP SMS with how long it was down. It doesn't send repeat reminders, and a station flipping between down and degraded counts as the same outage.
+- From 22:00 to 07:00 Harare (`MONITOR_QUIET_HOURS = "22-7"`) nothing is sent. At 07:00 (`MONITOR_SUMMARY_HOUR = "7"`) each person gets one SMS listing the stations still down and the ones that came back overnight. The summary repeats every morning while a station stays down.
+
+Set `MONITOR_QUIET_HOURS = ""` to alert at night, or `MONITOR_SUMMARY_HOUR = ""` to drop the morning summary.
+
+To spare the Ruijie open-API quota (which the whole account shares), a normal check makes about one request per device type per station (about 8 in all). It reuses the access token for 50 minutes and reads the project list and each station's device types once a day. If Ruijie answers "too many requests" (code 44), the next check is skipped.

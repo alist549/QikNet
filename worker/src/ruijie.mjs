@@ -4,7 +4,9 @@ import { delay, formatError, walkObjects } from "./shared.mjs";
 // an account secret. The account is identified by the app id and secret.
 const PUBLIC_LOGIN_TOKEN = "d63dss0a81e4415a889ac5b78fsc904a";
 
-export function createRuijieClient({ baseUrl, appId, secret, fetchImpl, retryDelayMs = 1_500 }) {
+// tokenCache (optional): { get(): Promise<string|null>, put(token): Promise<void> }
+// lets a caller reuse an access token across runs to save one request each time.
+export function createRuijieClient({ baseUrl, appId, secret, fetchImpl, retryDelayMs = 1_500, tokenCache }) {
   const base = String(baseUrl || "https://cloud-eu.ruijienetworks.com").replace(/\/$/, "");
   let tokenPromise;
   let identityPromise;
@@ -12,7 +14,16 @@ export function createRuijieClient({ baseUrl, appId, secret, fetchImpl, retryDel
   const profileCache = new Map();
   const profiledFor = new Set();
 
+  let usingCachedToken = false;
+
   async function accessToken() {
+    if (!tokenPromise && tokenCache) {
+      const cached = await tokenCache.get().catch(() => null);
+      if (cached) {
+        usingCachedToken = true;
+        tokenPromise = Promise.resolve(cached);
+      }
+    }
     if (!tokenPromise) {
       tokenPromise = (async () => {
         const response = await fetchImpl(`${base}/service/api/oauth20/client/access_token?token=${PUBLIC_LOGIN_TOKEN}`, {
@@ -25,6 +36,7 @@ export function createRuijieClient({ baseUrl, appId, secret, fetchImpl, retryDel
         if (!response.ok || result.code !== 0 || !result.accessToken) {
           throw new Error(`Ruijie API authentication failed (HTTP ${response.status}, API code ${result.code ?? "unknown"}).`);
         }
+        if (tokenCache) await tokenCache.put(result.accessToken).catch(() => {});
         return result.accessToken;
       })();
       tokenPromise.catch(() => {
@@ -51,7 +63,20 @@ export function createRuijieClient({ baseUrl, appId, secret, fetchImpl, retryDel
         const result = await response.json().catch(() => ({}));
         if (response.ok && result.code === 0) return result;
         lastFailure = `HTTP ${response.status}, API code ${result.code ?? "unknown"}`;
+        // Code 44 is Ruijie's "too many requests"; retrying straight away only burns more quota.
+        if (result.code === 44) {
+          const error = new Error(`Ruijie API request failed for ${pathname}: ${lastFailure} (rate limited).`);
+          error.rateLimited = true;
+          throw error;
+        }
+        // A cached token may have expired: get a fresh one once and try again.
+        if (usingCachedToken) {
+          usingCachedToken = false;
+          tokenPromise = undefined;
+          return request(pathname, { method, params, body, attempts });
+        }
       } catch (error) {
+        if (error.rateLimited) throw error;
         lastFailure = formatError(error);
         if (/budget/i.test(lastFailure)) break;
       }
