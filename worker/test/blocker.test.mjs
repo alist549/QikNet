@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideTargets, isHarareMidnight, normaliseMac, RULES, shouldKick } from "../src/blocker.mjs";
+import { decideTargets, isHarareMidnight, normaliseMac, RULES, shouldKick, splitDueBlocks } from "../src/blocker.mjs";
 import { rsaEncrypt } from "../src/console.mjs";
 
 const now = new Date("2026-11-04T20:00:00Z");
@@ -97,4 +97,17 @@ test("kicks a sign-in still online an hour or more after its voucher expired", (
   assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(-2), now), false);
   assert.equal(shouldKick({ onlineStatus: 0 }, hoursAgo(3), now), false);
   assert.equal(shouldKick({ onlineStatus: 1 }, null, now), false);
+});
+
+test("blocks are released two days after the day they were made", () => {
+  const blocked = {
+    "1:a": { mac: "a", blockedOn: "2026-11-06" },
+    "1:b": { mac: "b", blockedOn: "2026-11-05" },
+    "1:c": { mac: "c" },
+  };
+  const tonight = splitDueBlocks(blocked, "2026-11-07", 2);
+  assert.deepEqual(tonight.due.map((e) => e.mac), ["b"]);
+  assert.deepEqual(Object.keys(tonight.keep), ["1:a", "1:c"]);
+  const later = splitDueBlocks(blocked, "2026-11-08", 2);
+  assert.deepEqual(later.due.map((e) => e.mac), ["a", "b"]);
 });

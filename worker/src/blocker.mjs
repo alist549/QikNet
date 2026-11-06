@@ -25,7 +25,8 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 // On SSIDs without the portal (password networks such as QikCam), at most
 // MAX_PASSWORD_DEVICES devices are allowed; newer extra devices are blocked.
 //
-// Every MAC this job blocks is recorded in KV and released at 00:00
+// Every MAC this job blocks is recorded in KV and released at 00:00 two days
+// later (blocked on Monday means blocked all of Monday and Tuesday)
 // Africa/Harare. MACs blocked by hand in the console are never touched.
 
 export const BLOCKER_STATE_KEY = "blocker-state";
@@ -55,6 +56,9 @@ export const RULES = {
   // Most blocks added per site per run, heaviest users first.
   blocksPerSitePerRun: 12,
   portalSsidCacheHours: 6,
+  // A block made on day D lasts this many days: with 2 it is released at the
+  // 00:00 that starts day D+2.
+  blockDays: 2,
   // Requests kept back from the midnight release so blocking carries on while
   // the release is spread over several runs.
   siteCheckReserve: 30,
@@ -106,11 +110,15 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
       retryDelayMs: env.RETRY_DELAY_MS == null ? 1_500 : Number(env.RETRY_DELAY_MS),
     });
 
-    // 1. At 00:00 Harare, release everything this job blocked during the day.
+    // Blocks recorded before blockedOn existed were all made on the current day.
+    for (const entry of Object.values(state.blocked ?? {})) entry.blockedOn ??= state.day.date;
+
+    // 1. At 00:00 Harare, release the blocks that have served their time.
     if (release || state.pendingRelease?.length) {
       if (release) {
-        state.pendingRelease = [...(state.pendingRelease ?? []), ...Object.values(state.blocked ?? {})];
-        state.blocked = {};
+        const { due, keep } = splitDueBlocks(state.blocked ?? {}, harareDate(startedAt), RULES.blockDays);
+        state.pendingRelease = [...(state.pendingRelease ?? []), ...due];
+        state.blocked = keep;
       }
       const still = [];
       for (const entry of state.pendingRelease) {
@@ -165,7 +173,9 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
         const reblocked = new Set(targets.map((target) => target.mac));
         state.pendingRelease = (state.pendingRelease ?? []).filter((entry) => entry.groupId !== site.groupId || !reblocked.has(entry.mac));
         for (const target of targets) {
-          state.blocked[`${site.groupId}:${target.mac}`] = target;
+          const key = `${site.groupId}:${target.mac}`;
+          target.blockedOn = state.blocked[key]?.blockedOn ?? harareDate(startedAt);
+          state.blocked[key] = target;
           report.blocked.push(target);
         }
       } catch (error) {
@@ -214,7 +224,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     ...(lines.length ? lines : ["No devices blocked."]),
     day.kicked ? `Expired vouchers kicked off the portal: ${day.kicked}` : null,
     day.errors ? `Errors during the day: ${day.errors}` : null,
-    "All blocks released at 00:00.",
+    `Blocks are released ${RULES.blockDays} days after they were made.`,
   ].filter(Boolean).join("\n");
 
   if (sendSms) {
@@ -488,6 +498,21 @@ function newDay(at) {
 export function isHarareMidnight(date) {
   const harare = new Date(date.getTime() + HARARE_OFFSET_MINUTES * 60_000);
   return harare.getUTCHours() === 0 && harare.getUTCMinutes() < 5;
+}
+
+// Splits recorded blocks into those due for release at the midnight starting
+// `today` (made blockDays or more days ago) and those that stay.
+export function splitDueBlocks(blocked, today, blockDays) {
+  const cutoff = new Date(`${today}T00:00:00Z`);
+  cutoff.setUTCDate(cutoff.getUTCDate() - blockDays);
+  const last = cutoff.toISOString().slice(0, 10);
+  const due = [];
+  const keep = {};
+  for (const [key, entry] of Object.entries(blocked)) {
+    if ((entry.blockedOn ?? today) <= last) due.push(entry);
+    else keep[key] = entry;
+  }
+  return { due, keep };
 }
 
 function harareDate(date) {
