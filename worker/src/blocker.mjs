@@ -53,6 +53,9 @@ export const RULES = {
   // something is probably wrong with the data, so the site is skipped.
   maxBlocksPerSitePerRun: 12,
   portalSsidCacheHours: 6,
+  // Requests kept back from the midnight release so blocking carries on while
+  // the release is spread over several runs.
+  siteCheckReserve: 26,
 };
 
 const HARARE_OFFSET_MINUTES = 120;
@@ -109,7 +112,8 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
       }
       const still = [];
       for (const entry of state.pendingRelease) {
-        if (budget.remaining() < 6) {
+        // Leave enough requests to still check every site this run.
+        if (budget.remaining() < RULES.siteCheckReserve) {
           still.push(entry);
           continue;
         }
@@ -154,6 +158,10 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
           params: { type: "deny", macList: targets.map((target) => ({ mac: colonMac(target.mac) })) },
         });
         if (result.code !== 0) throw new Error(result.msg ?? `code ${result.code}`);
+        // A MAC blocked again before its midnight release came round must not
+        // be released afterwards.
+        const reblocked = new Set(targets.map((target) => target.mac));
+        state.pendingRelease = (state.pendingRelease ?? []).filter((entry) => entry.groupId !== site.groupId || !reblocked.has(entry.mac));
         for (const target of targets) {
           state.blocked[`${site.groupId}:${target.mac}`] = target;
           report.blocked.push(target);
