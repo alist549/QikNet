@@ -64,6 +64,10 @@ export const RULES = {
   // Requests kept back from releases so blocking carries on while a big batch
   // of releases is spread over several runs.
   siteCheckReserve: 30,
+  loginPauseMinutes: 30,
+  // Health alert: one SMS after this many runs in a row with errors (15 min),
+  // and one SMS when a run is clean again.
+  alertAfterFailedRuns: 3,
 };
 
 const HARARE_OFFSET_MINUTES = 120;
@@ -94,14 +98,30 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
     });
     // Reuse the console session between runs so the job doesn't sign in every
     // 5 minutes; sign in again only when the session has expired.
+    // A rejected password is never retried straight away: repeated failures
+    // can lock the account. Sign-in waits loginPauseMinutes after a rejection.
+    const signIn = async () => {
+      if (state.loginPausedUntil && Date.parse(state.loginPausedUntil) > startedAt.getTime()) {
+        throw new Error(`Ruijie sign-in paused until ${state.loginPausedUntil} after the password was rejected.`);
+      }
+      try {
+        await ruijie.login();
+        delete state.loginPausedUntil;
+      } catch (error) {
+        if (/rejected the sign-in|two-factor/i.test(error.message)) {
+          state.loginPausedUntil = new Date(startedAt.getTime() + RULES.loginPauseMinutes * 60_000).toISOString();
+        }
+        throw error;
+      }
+    };
     if (state.session?.cookies) ruijie.importCookies(state.session.cookies);
-    else await ruijie.login();
+    else await signIn();
     try {
       await ruijie.ensureSession();
     } catch (error) {
       if (!error.sessionExpired) throw error;
       ruijie.cookies.clear();
-      await ruijie.login();
+      await signIn();
     }
     if (ruijie.loggedInThisRun) state.session = { cookies: ruijie.exportCookies(), at: now().toISOString() };
 
@@ -210,6 +230,8 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
   state.day.runs += 1;
   if (report.errors.length) state.day.errors += report.errors.length;
 
+  await checkHealth(env, state, report, { fetchImpl });
+
   report.subrequests = budget.used;
   // One KV write per run (the free plan allows 1,000 writes a day): the latest
   // report and the console session live inside the state record.
@@ -269,6 +291,57 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
   await env.STATE.put(BLOCKER_STATE_KEY, JSON.stringify(state));
   await env.STATE.put(BLOCKER_DAY_REPORT_KEY, JSON.stringify(summary));
   return summary;
+}
+
+// Sends one SMS when runs have kept failing and one when they work again.
+export async function checkHealth(env, state, report, { fetchImpl }) {
+  const health = (state.health ??= { failures: 0 });
+  if (report.errors.length) {
+    health.failures += 1;
+    health.since ??= report.checkedAt;
+    health.lastError = `${report.errors[0].site ? `${report.errors[0].site}: ` : ""}${report.errors[0].message}`;
+    if (health.failures >= RULES.alertAfterFailedRuns && !health.alerted) {
+      const message = [
+        "QikNet blocker ALERT: not working properly.",
+        `Failing since ${harareTime(health.since)} (${health.failures} runs).`,
+        `Error: ${health.lastError}`.slice(0, 200),
+      ].join("\n");
+      health.alerted = (await sendBlockerSms(env, "QikNet Blocker Alert", message, fetchImpl)) ? report.checkedAt : null;
+      report.healthAlert = health.alerted ? "sent" : "failed";
+    }
+    return;
+  }
+  if (health.alerted) {
+    const minutes = Math.round((Date.parse(report.checkedAt) - Date.parse(health.since)) / 60_000);
+    await sendBlockerSms(env, "QikNet Blocker Recovered", `QikNet blocker is working again (down about ${minutes} min, since ${harareTime(health.since)}).`, fetchImpl);
+    report.healthAlert = "recovered";
+  }
+  state.health = { failures: 0, lastOk: report.checkedAt };
+}
+
+async function sendBlockerSms(env, campaignName, message, fetchImpl) {
+  if (!/^true$/i.test(String(env.BLOCKER_REPORT_SMS ?? ""))) return false;
+  try {
+    await sendSmsCampaign({
+      token: requiredEnv(env, "SMSPOP_TOKEN"),
+      campaignUrl: config.sms.campaignUrl,
+      senderId: config.sms.senderId,
+      recipient: String(env.BLOCKER_REPORT_RECIPIENT || requiredEnv(env, "STOCK_REPORT_RECIPIENT")).trim(),
+      campaignName,
+      message,
+      retries: 1,
+      retryDelayMs: Number(env.RETRY_DELAY_MS ?? 5_000),
+      fetchImpl,
+    });
+    return true;
+  } catch (error) {
+    log(`Blocker SMS failed: ${formatError(error)}`);
+    return false;
+  }
+}
+
+function harareTime(iso) {
+  return new Date(Date.parse(iso) + HARARE_OFFSET_MINUTES * 60_000).toISOString().slice(11, 16);
 }
 
 export async function listSites(ruijie) {

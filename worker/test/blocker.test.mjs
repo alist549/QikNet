@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideTargets, isHarareMidnight, normaliseMac, blockHours, dueBlocks, RULES, seedOffences, shouldKick } from "../src/blocker.mjs";
+import { decideTargets, isHarareMidnight, normaliseMac, blockHours, checkHealth, dueBlocks, RULES, seedOffences, shouldKick } from "../src/blocker.mjs";
 import { rsaEncrypt } from "../src/console.mjs";
 
 const now = new Date("2026-11-04T20:00:00Z");
@@ -122,4 +122,27 @@ test("offence counts are seeded one per day blocked", () => {
   ]);
   assert.equal(offences.a.count, 2);
   assert.equal(offences.b.count, 1);
+});
+
+test("health alert: one SMS after 3 failed runs, one when it recovers", async () => {
+  const sent = [];
+  const fetchImpl = async (url, init) => {
+    sent.push(JSON.parse(init.body));
+    return new Response(JSON.stringify({ success: true, status: "success", code: 0 }), { status: 200, headers: { "content-type": "application/json" } });
+  };
+  const env = { BLOCKER_REPORT_SMS: "true", SMSPOP_TOKEN: "t", STOCK_REPORT_RECIPIENT: "263770000000", RETRY_DELAY_MS: "0" };
+  const state = {};
+  const run = (at, errors) => checkHealth(env, state, { checkedAt: at, errors }, { fetchImpl });
+  await run("2026-11-06T16:20:00Z", [{ message: "boom" }]);
+  await run("2026-11-06T16:25:00Z", [{ message: "boom" }]);
+  assert.equal(sent.length, 0);
+  await run("2026-11-06T16:30:00Z", [{ message: "boom" }]);
+  assert.equal(sent.length, 1);
+  await run("2026-11-06T16:35:00Z", [{ message: "boom" }]);
+  assert.equal(sent.length, 1);
+  await run("2026-11-06T16:40:00Z", []);
+  assert.equal(sent.length, 2);
+  await run("2026-11-06T16:45:00Z", []);
+  assert.equal(sent.length, 2);
+  assert.equal(state.health.failures, 0);
 });
