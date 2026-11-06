@@ -1,7 +1,6 @@
 import config from "../../config/sync.config.json" with { type: "json" };
 import { maskPhone, sendSmsCampaign } from "../../src/sms.mjs";
 import { RuijieConsole } from "./console.mjs";
-import { createRuijieClient } from "./ruijie.mjs";
 import { createBudget, formatError, log, requiredEnv, splitList } from "./shared.mjs";
 
 // Blocks devices that use the hotspot without paying, through the Ruijie web
@@ -105,13 +104,6 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
       await ruijie.login();
     }
     if (ruijie.loggedInThisRun) state.session = { cookies: ruijie.exportCookies(), at: now().toISOString() };
-    const openApi = createRuijieClient({
-      baseUrl: env.RUIJIE_API_BASE_URL,
-      appId: requiredEnv(env, "RUIJIE_API_APP_ID"),
-      secret: requiredEnv(env, "RUIJIE_API_SECRET"),
-      fetchImpl: budget.fetch,
-      retryDelayMs: env.RETRY_DELAY_MS == null ? 1_500 : Number(env.RETRY_DELAY_MS),
-    });
 
     // First run with offence counts: seed them from the days already on record
     // (each day a device was blocked counts once).
@@ -170,7 +162,7 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
         continue;
       }
       try {
-        const summary = await checkSite(ruijie, openApi, site, { state, allowList, now: startedAt });
+        const summary = await checkSite(ruijie, site, { state, allowList, now: startedAt });
         report.sites.push(summary.site);
         await kickExpired(ruijie, summary.kicks, { live, report, budget });
         const targets = summary.targets;
@@ -289,7 +281,7 @@ export async function listSites(ruijie) {
   }));
 }
 
-async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
+async function checkSite(ruijie, site, { state, allowList, now }) {
   const summary = { name: site.name, online: 0, paid: 0, unpaid: 0, toBlock: 0 };
   if (!site.online) return { site: { ...summary, skipped: "AP offline" }, targets: [] };
 
@@ -321,7 +313,7 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   if (auth.code !== 0 || !Array.isArray(records)) throw new Error(`Voucher sign-in list failed: ${auth.msg ?? "no data"}`);
   const total = Number(auth.data.result.total ?? records.length);
   if (total > records.length) throw new Error(`Voucher sign-in list was cut short (${records.length} of ${total}); skipping to be safe.`);
-  const active = await activeVoucherCodes(openApi, site.groupId, now);
+  const active = await activeVoucherCodes(ruijie, site.groupId, now);
   const paidMacs = new Set(
     records.filter((record) => active.has(String(record.account ?? "").toLowerCase())).map((record) => normaliseMac(record.userMac)),
   );
@@ -344,7 +336,7 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
       continue;
     }
     lookups += 1;
-    const expiry = await voucherExpiry(openApi, site.groupId, code);
+    const expiry = await voucherExpiry(ruijie, site.groupId, code);
     if (expiry == null || expiry > now.getTime() - RULES.expiryGraceHours * 3_600_000) paidMacs.add(mac);
     if (shouldKick(record, expiry, now) && kicks.length < RULES.maxKicksPerSitePerRun) {
       kicks.push({ site: site.name, groupId: site.groupId, mac, code, expiredHoursAgo: Math.round(((now.getTime() - expiry) / 3_600_000) * 10) / 10, record });
@@ -462,30 +454,27 @@ function target(site, client, mac, ssid, reason) {
   };
 }
 
+// Voucher lists come from the web console rather than the open API: the open
+// API has a request quota ("Too many requests", code 44) that the blocker used
+// up on 2026-11-06, which also starves the station monitor and stock sync.
+async function consoleVouchers(ruijie, groupId, querys) {
+  const result = await ruijie.api(`/intlSamVoucher/getList/${encodeURIComponent(ruijie.user)}/${encodeURIComponent(groupId)}`, { querys });
+  if (result.code !== 0 || !Array.isArray(result.voucherData?.list)) {
+    throw new Error(`Voucher list failed: ${result.msg ?? result.voucherData?.msg ?? "no data"}`);
+  }
+  return result.voucherData.list;
+}
+
 // Vouchers that are in use (status 2) and not yet expired. A voucher without an
 // expiry time (such as Staff) counts as active.
-async function activeVoucherCodes(openApi, groupId, now) {
-  openApi.identity ??= openApi.request("/service/api/org/account/info");
-  const identity = await openApi.identity;
-  if (!identity.account) throw new Error("Ruijie API account lookup failed.");
-  const result = await openApi.request(
-    `/service/api/intlSamVoucher/getList/${encodeURIComponent(identity.account)}/${encodeURIComponent(groupId)}`,
-    { params: { start: 0, pageSize: 1000, status: 2 } },
-  );
-  const list = result.voucherData?.list;
-  if (!Array.isArray(list)) throw new Error("Active voucher list was missing; skipping this site to be safe.");
-  return activeCodes(list, now);
+async function activeVoucherCodes(ruijie, groupId, now) {
+  return activeCodes(await consoleVouchers(ruijie, groupId, { start: 0, pageSize: 1000, status: 2 }), now);
 }
 
 // Expiry time (ms) of one voucher, or null if it has none or can't be found.
-async function voucherExpiry(openApi, groupId, code) {
-  openApi.identity ??= openApi.request("/service/api/org/account/info");
-  const identity = await openApi.identity;
-  const result = await openApi.request(
-    `/service/api/intlSamVoucher/getList/${encodeURIComponent(identity.account)}/${encodeURIComponent(groupId)}`,
-    { params: { start: 0, pageSize: 10, name: code } },
-  );
-  const voucher = (result.voucherData?.list ?? []).find((entry) => String(entry.voucherCode).toLowerCase() === String(code).toLowerCase());
+async function voucherExpiry(ruijie, groupId, code) {
+  const list = await consoleVouchers(ruijie, groupId, { start: 0, pageSize: 10, name: code });
+  const voucher = list.find((entry) => String(entry.voucherCode).toLowerCase() === String(code).toLowerCase());
   const expiry = Number(voucher?.expiryTime);
   return expiry > 0 ? expiry : null;
 }
