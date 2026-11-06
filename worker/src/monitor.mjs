@@ -9,8 +9,9 @@ export const GROUPS_KEY = "monitor-groups";
 export const TOKEN_KEY = "monitor-ruijie-token";
 const TOKEN_TTL_SECONDS = 50 * 60;
 export const BACKOFF_KEY = "monitor-backoff-until";
-// After Ruijie says "too many requests", skip checks for this long.
-const RATE_LIMIT_BACKOFF_MINUTES = 30;
+// After Ruijie says "too many requests", skip the next check (they are 30 minutes
+// apart). Kept under 30 so the check after that isn't skipped by a few milliseconds.
+const RATE_LIMIT_BACKOFF_MINUTES = 25;
 
 const COMPONENT_TYPES = [
   ["AP", "AP"],

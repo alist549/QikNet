@@ -357,7 +357,7 @@ test("after the first check of the day, a monitor run asks only for device types
   assert.equal(used.length, enabled.length * 3, `used ${used.length}`);
 });
 
-test("a Ruijie rate limit pauses checks for 30 minutes without retrying", async () => {
+test("a Ruijie rate limit skips the next check without retrying", async () => {
   const env = baseEnv(QUIET);
   let calls = 0;
   const fetchImpl = async (input) => {
@@ -368,8 +368,10 @@ test("a Ruijie rate limit pauses checks for 30 minutes without retrying", async 
   };
   const first = await runMonitor(env, { sendSms: true, fetchImpl, now: at("2026-11-05T08:00:00Z") });
   assert.equal(calls, 2, "one token call, one rate-limited call, no retries");
-  assert.equal(first.backoffUntil, "2026-11-05T08:30:00.000Z");
+  assert.equal(first.backoffUntil, "2026-11-05T08:25:00.000Z");
   const paused = await runMonitor(env, { sendSms: true, fetchImpl, now: at("2026-11-05T08:15:00Z") });
   assert.match(paused.skipped, /paused/);
   assert.equal(calls, 2);
+  await runMonitor(env, { sendSms: true, fetchImpl, now: at("2026-11-05T08:29:59Z") });
+  assert.ok(calls > 2, "the next scheduled check runs again");
 });

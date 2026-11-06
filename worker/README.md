@@ -120,4 +120,4 @@ To keep SMS down, the monitor follows these rules (set in `[vars]` in `wrangler.
 
 Set `MONITOR_QUIET_HOURS = ""` to alert at night, or `MONITOR_SUMMARY_HOUR = ""` to drop the morning summary.
 
-To spare the Ruijie open-API quota (which the whole account shares), a normal check makes about one request per device type per station (about 8 in all). It reuses the access token for 50 minutes and reads the project list and each station's device types once a day. If Ruijie answers "too many requests" (code 44), checks pause for 30 minutes.
+To spare the Ruijie open-API quota (which the whole account shares), a normal check makes about one request per device type per station (about 8 in all). It reuses the access token for 50 minutes and reads the project list and each station's device types once a day. If Ruijie answers "too many requests" (code 44), the next check is skipped.
