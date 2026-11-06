@@ -52,9 +52,8 @@ export const RULES = {
   // Safety stop: if a site suddenly shows more than this many devices to block,
   // something is probably wrong with the data, so the site is skipped.
   maxBlocksPerSitePerRun: 25,
-  // The console blocklist only keeps the newest few entries per site (8 at
-  // Unit N), so at most this many are added per run, heaviest users first.
-  blocksPerSitePerRun: 6,
+  // Most blocks added per site per run, heaviest users first.
+  blocksPerSitePerRun: 12,
   portalSsidCacheHours: 6,
   // Requests kept back from the midnight release so blocking carries on while
   // the release is spread over several runs.
@@ -317,9 +316,9 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   }
 
   const expiredMacs = new Set(records.map((record) => normaliseMac(record.userMac)).filter((mac) => !paidMacs.has(mac)));
-  // What the console's blocklist actually holds right now. It drops the oldest
-  // entries once it is full (8 at Unit N, 16 at Unit L), so a device blocked
-  // earlier can be back online and must be blocked again.
+  // What the console's blocklist actually holds right now. Entries can be
+  // removed by hand in the console, so a device blocked earlier may be back
+  // online and must be blocked again.
   const blocklist = await ruijie.api(`/homescene/mac_filter/${site.groupId}`);
   if (blocklist.code !== 0 || !Array.isArray(blocklist.list)) throw new Error(`Blocklist read failed: ${blocklist.msg ?? "no data"}`);
   const alreadyBlocked = Object.fromEntries(blocklist.list.map((entry) => [`${site.groupId}:${normaliseMac(entry.mac)}`, true]));
