@@ -51,11 +51,14 @@ export const RULES = {
   maxPasswordDevices: 2,
   // Safety stop: if a site suddenly shows more than this many devices to block,
   // something is probably wrong with the data, so the site is skipped.
-  maxBlocksPerSitePerRun: 12,
+  maxBlocksPerSitePerRun: 25,
+  // The console blocklist only keeps the newest few entries per site (8 at
+  // Unit N), so at most this many are added per run, heaviest users first.
+  blocksPerSitePerRun: 6,
   portalSsidCacheHours: 6,
   // Requests kept back from the midnight release so blocking carries on while
   // the release is spread over several runs.
-  siteCheckReserve: 26,
+  siteCheckReserve: 30,
 };
 
 const HARARE_OFFSET_MINUTES = 120;
@@ -314,13 +317,21 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   }
 
   const expiredMacs = new Set(records.map((record) => normaliseMac(record.userMac)).filter((mac) => !paidMacs.has(mac)));
-  const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked: state.blocked ?? {}, now });
+  // What the console's blocklist actually holds right now. It drops the oldest
+  // entries once it is full (8 at Unit N, 16 at Unit L), so a device blocked
+  // earlier can be back online and must be blocked again.
+  const blocklist = await ruijie.api(`/homescene/mac_filter/${site.groupId}`);
+  if (blocklist.code !== 0 || !Array.isArray(blocklist.list)) throw new Error(`Blocklist read failed: ${blocklist.msg ?? "no data"}`);
+  const alreadyBlocked = Object.fromEntries(blocklist.list.map((entry) => [`${site.groupId}:${normaliseMac(entry.mac)}`, true]));
+  summary.listed = blocklist.list.length;
+  const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked, now });
   Object.assign(summary, decision.counts);
   if (decision.targets.length > RULES.maxBlocksPerSitePerRun) {
     throw new Error(`${decision.targets.length} devices to block is above the safety limit of ${RULES.maxBlocksPerSitePerRun}; nothing blocked at this site.`);
   }
+  const targets = [...decision.targets].sort((a, b) => b.usedMb - a.usedMb).slice(0, RULES.blocksPerSitePerRun);
   summary.toKick = kicks.length;
-  return { site: summary, targets: decision.targets, kicks };
+  return { site: summary, targets, kicks };
 }
 
 // A sign-in should be kicked when the portal still shows it online although its
