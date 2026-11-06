@@ -25,9 +25,9 @@ export default {
     if (event.cron === BLOCKER_CRON) {
       const live = parseBoolean(env.BLOCKER_LIVE, false);
       const midnight = isHarareMidnight(new Date(event.scheduledTime));
-      // At 00:00 Harare: report on the day, release its blocks, then check again straight away.
+      // At 00:00 Harare: send the day report. Blocks are released whenever their time is up.
       if (midnight) await finishBlockerDay(env, { sendSms: parseBoolean(env.BLOCKER_REPORT_SMS, false) });
-      const report = await runBlocker(env, { live, release: midnight });
+      const report = await runBlocker(env, { live });
       if (report.errors.length) throw new Error(`Blocker finished with ${report.errors.length} error(s).`);
       return;
     }

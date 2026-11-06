@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideTargets, isHarareMidnight, normaliseMac, RULES, shouldKick, splitDueBlocks } from "../src/blocker.mjs";
+import { decideTargets, isHarareMidnight, normaliseMac, blockHours, dueBlocks, RULES, seedOffences, shouldKick } from "../src/blocker.mjs";
 import { rsaEncrypt } from "../src/console.mjs";
 
 const now = new Date("2026-11-04T20:00:00Z");
@@ -99,15 +99,27 @@ test("kicks a sign-in still online an hour or more after its voucher expired", (
   assert.equal(shouldKick({ onlineStatus: 1 }, null, now), false);
 });
 
-test("blocks are released two days after the day they were made", () => {
-  const blocked = {
-    "1:a": { mac: "a", blockedOn: "2026-11-06" },
-    "1:b": { mac: "b", blockedOn: "2026-11-05" },
-    "1:c": { mac: "c" },
-  };
-  const tonight = splitDueBlocks(blocked, "2026-11-07", 2);
-  assert.deepEqual(tonight.due.map((e) => e.mac), ["b"]);
-  assert.deepEqual(Object.keys(tonight.keep), ["1:a", "1:c"]);
-  const later = splitDueBlocks(blocked, "2026-11-08", 2);
-  assert.deepEqual(later.due.map((e) => e.mac), ["a", "b"]);
+test("blocks get longer for repeat offenders, up to 72 hours", () => {
+  assert.deepEqual([1, 2, 3, 4, 9].map(blockHours), [12, 24, 48, 72, 72]);
+});
+
+test("only blocks whose time is up are released", () => {
+  const now = new Date("2026-11-07T10:00:00Z");
+  const { due, keep } = dueBlocks(
+    { "1:a": { mac: "a", releaseAt: "2026-11-07T09:00:00Z" }, "1:b": { mac: "b", releaseAt: "2026-11-07T11:00:00Z" } },
+    now,
+  );
+  assert.deepEqual(due.map((e) => e.mac), ["a"]);
+  assert.deepEqual(Object.keys(keep), ["1:b"]);
+});
+
+test("offence counts are seeded one per day blocked", () => {
+  const offences = seedOffences([
+    { mac: "a", at: "2026-11-05T10:00:00Z" },
+    { mac: "a", at: "2026-11-06T10:00:00Z" },
+    { mac: "a", at: "2026-11-06T12:00:00Z" },
+    { mac: "b", at: "2026-11-06T12:00:00Z" },
+  ]);
+  assert.equal(offences.a.count, 2);
+  assert.equal(offences.b.count, 1);
 });

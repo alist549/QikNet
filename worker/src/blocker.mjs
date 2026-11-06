@@ -25,8 +25,9 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 // On SSIDs without the portal (password networks such as QikCam), at most
 // MAX_PASSWORD_DEVICES devices are allowed; newer extra devices are blocked.
 //
-// Every MAC this job blocks is recorded in KV and released at 00:00 two days
-// later (blocked on Monday means blocked all of Monday and Tuesday)
+// Every MAC this job blocks is recorded in KV with how many times it has been
+// blocked. The block is lifted after 12 hours the first time, 24 hours the
+// second, 48 hours the third and 72 hours from then on
 // Africa/Harare. MACs blocked by hand in the console are never touched.
 
 export const BLOCKER_STATE_KEY = "blocker-state";
@@ -56,17 +57,19 @@ export const RULES = {
   // Most blocks added per site per run, heaviest users first.
   blocksPerSitePerRun: 12,
   portalSsidCacheHours: 6,
-  // A block made on day D lasts this many days: with 2 it is released at the
-  // 00:00 that starts day D+2.
-  blockDays: 2,
-  // Requests kept back from the midnight release so blocking carries on while
-  // the release is spread over several runs.
+  // How long a block lasts, by how many times the device has been blocked:
+  // 1st 12 h, 2nd 24 h, 3rd 48 h, 4th and later 72 h (the maximum).
+  blockHours: [12, 24, 48, 72],
+  // A device's offence count is forgotten after this many days without one.
+  offenceMemoryDays: 30,
+  // Requests kept back from releases so blocking carries on while a big batch
+  // of releases is spread over several runs.
   siteCheckReserve: 30,
 };
 
 const HARARE_OFFSET_MINUTES = 120;
 
-export async function runBlocker(env, { live, release = false, fetchImpl = fetch, now = () => new Date() } = {}) {
+export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new Date() } = {}) {
   const budget = createBudget(undefined, fetchImpl);
   const startedAt = now();
   const report = {
@@ -110,16 +113,29 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
       retryDelayMs: env.RETRY_DELAY_MS == null ? 1_500 : Number(env.RETRY_DELAY_MS),
     });
 
-    // Blocks recorded before blockedOn existed were all made on the current day.
-    for (const entry of Object.values(state.blocked ?? {})) entry.blockedOn ??= state.day.date;
+    // First run with offence counts: seed them from the days already on record
+    // (each day a device was blocked counts once).
+    if (!state.offences) {
+      const lastDay = await env.STATE.get(BLOCKER_DAY_REPORT_KEY, "json");
+      state.offences = seedOffences([...(lastDay?.blocked ?? []), ...(state.day.blocked ?? [])]);
+    }
+    for (const entry of Object.values(state.blocked ?? {})) {
+      if (entry.releaseAt) continue;
+      state.offences[entry.mac] ??= { count: 1, last: startedAt.toISOString() };
+      // Time is counted from now, so an existing block lasts its full length.
+      entry.offence = state.offences[entry.mac].count;
+      entry.releaseAt = new Date(startedAt.getTime() + blockHours(entry.offence) * 3_600_000).toISOString();
+    }
+    const forgetBefore = new Date(startedAt.getTime() - RULES.offenceMemoryDays * 86_400_000).toISOString();
+    for (const [mac, offence] of Object.entries(state.offences)) if (offence.last < forgetBefore) delete state.offences[mac];
 
-    // 1. At 00:00 Harare, release the blocks that have served their time.
-    if (release || state.pendingRelease?.length) {
-      if (release) {
-        const { due, keep } = splitDueBlocks(state.blocked ?? {}, harareDate(startedAt), RULES.blockDays);
-        state.pendingRelease = [...(state.pendingRelease ?? []), ...due];
-        state.blocked = keep;
-      }
+    // 1. Release the blocks that have served their time.
+    const { due, keep } = dueBlocks(state.blocked ?? {}, startedAt);
+    if (due.length) {
+      state.pendingRelease = [...(state.pendingRelease ?? []), ...due];
+      state.blocked = keep;
+    }
+    if (state.pendingRelease?.length) {
       const still = [];
       for (const entry of state.pendingRelease) {
         // Leave enough requests to still check every site this run.
@@ -168,13 +184,23 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
           params: { type: "deny", macList: targets.map((target) => ({ mac: colonMac(target.mac) })) },
         });
         if (result.code !== 0) throw new Error(result.msg ?? `code ${result.code}`);
-        // A MAC blocked again before its midnight release came round must not
-        // be released afterwards.
+        // A MAC blocked again before its release went through must not be
+        // released afterwards.
         const reblocked = new Set(targets.map((target) => target.mac));
         state.pendingRelease = (state.pendingRelease ?? []).filter((entry) => entry.groupId !== site.groupId || !reblocked.has(entry.mac));
         for (const target of targets) {
           const key = `${site.groupId}:${target.mac}`;
-          target.blockedOn = state.blocked[key]?.blockedOn ?? harareDate(startedAt);
+          const serving = state.blocked[key];
+          if (serving) {
+            // Still serving a block (it was removed from the list by hand): keep its time.
+            target.offence = serving.offence;
+            target.releaseAt = serving.releaseAt;
+          } else {
+            const count = (state.offences[target.mac]?.count ?? 0) + 1;
+            state.offences[target.mac] = { count, last: startedAt.toISOString() };
+            target.offence = count;
+            target.releaseAt = new Date(startedAt.getTime() + blockHours(count) * 3_600_000).toISOString();
+          }
           state.blocked[key] = target;
           report.blocked.push(target);
         }
@@ -224,7 +250,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     ...(lines.length ? lines : ["No devices blocked."]),
     day.kicked ? `Expired vouchers kicked off the portal: ${day.kicked}` : null,
     day.errors ? `Errors during the day: ${day.errors}` : null,
-    `Blocks are released ${RULES.blockDays} days after they were made.`,
+    "Blocks last 12h, 24h, 48h, then 72h for repeat offenders.",
   ].filter(Boolean).join("\n");
 
   if (sendSms) {
@@ -500,16 +526,31 @@ export function isHarareMidnight(date) {
   return harare.getUTCHours() === 0 && harare.getUTCMinutes() < 5;
 }
 
-// Splits recorded blocks into those due for release at the midnight starting
-// `today` (made blockDays or more days ago) and those that stay.
-export function splitDueBlocks(blocked, today, blockDays) {
-  const cutoff = new Date(`${today}T00:00:00Z`);
-  cutoff.setUTCDate(cutoff.getUTCDate() - blockDays);
-  const last = cutoff.toISOString().slice(0, 10);
+// Offence counts from earlier block records: one per Harare day blocked.
+export function seedOffences(records) {
+  const days = {};
+  for (const record of records) {
+    if (!record?.mac || !record.at) continue;
+    (days[record.mac] ??= new Set()).add(harareDate(new Date(record.at)));
+  }
+  const offences = {};
+  for (const [mac, set] of Object.entries(days)) {
+    offences[mac] = { count: set.size, last: new Date().toISOString() };
+  }
+  return offences;
+}
+
+// Hours a block lasts for a device's nth offence.
+export function blockHours(count) {
+  return RULES.blockHours[Math.min(Math.max(count, 1), RULES.blockHours.length) - 1];
+}
+
+// Splits recorded blocks into those whose time is up and those that stay.
+export function dueBlocks(blocked, now) {
   const due = [];
   const keep = {};
   for (const [key, entry] of Object.entries(blocked)) {
-    if ((entry.blockedOn ?? today) <= last) due.push(entry);
+    if (entry.releaseAt && Date.parse(entry.releaseAt) <= now.getTime()) due.push(entry);
     else keep[key] = entry;
   }
   return { due, keep };
