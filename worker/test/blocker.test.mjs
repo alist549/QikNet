@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { decideTargets, isHarareMidnight, normaliseMac, RULES } from "../src/blocker.mjs";
+import { decideTargets, isHarareMidnight, normaliseMac, blockHours, dueBlocks, RULES, seedOffences, shouldKick } from "../src/blocker.mjs";
 import { rsaEncrypt } from "../src/console.mjs";
 
 const now = new Date("2026-11-04T20:00:00Z");
@@ -86,4 +86,40 @@ test("expired vouchers are not active; vouchers without an expiry are", async ()
 
 test("grace period is 12 hours after expiry", () => {
   assert.equal(RULES.expiryGraceHours, 12);
+});
+
+test("kicks a sign-in still online an hour or more after its voucher expired", () => {
+  const now = new Date("2026-11-05T17:00:00Z");
+  const hoursAgo = (h) => now.getTime() - h * 3_600_000;
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(1.5), now), true);
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(20), now), true);
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(0.5), now), false);
+  assert.equal(shouldKick({ onlineStatus: 1 }, hoursAgo(-2), now), false);
+  assert.equal(shouldKick({ onlineStatus: 0 }, hoursAgo(3), now), false);
+  assert.equal(shouldKick({ onlineStatus: 1 }, null, now), false);
+});
+
+test("blocks get longer for repeat offenders, up to 72 hours", () => {
+  assert.deepEqual([1, 2, 3, 4, 9].map(blockHours), [12, 24, 48, 72, 72]);
+});
+
+test("only blocks whose time is up are released", () => {
+  const now = new Date("2026-11-07T10:00:00Z");
+  const { due, keep } = dueBlocks(
+    { "1:a": { mac: "a", releaseAt: "2026-11-07T09:00:00Z" }, "1:b": { mac: "b", releaseAt: "2026-11-07T11:00:00Z" } },
+    now,
+  );
+  assert.deepEqual(due.map((e) => e.mac), ["a"]);
+  assert.deepEqual(Object.keys(keep), ["1:b"]);
+});
+
+test("offence counts are seeded one per day blocked", () => {
+  const offences = seedOffences([
+    { mac: "a", at: "2026-11-05T10:00:00Z" },
+    { mac: "a", at: "2026-11-06T10:00:00Z" },
+    { mac: "a", at: "2026-11-06T12:00:00Z" },
+    { mac: "b", at: "2026-11-06T12:00:00Z" },
+  ]);
+  assert.equal(offences.a.count, 2);
+  assert.equal(offences.b.count, 1);
 });

@@ -1,7 +1,6 @@
 import config from "../../config/sync.config.json" with { type: "json" };
 import { maskPhone, sendSmsCampaign } from "../../src/sms.mjs";
 import { RuijieConsole } from "./console.mjs";
-import { createRuijieClient } from "./ruijie.mjs";
 import { createBudget, formatError, log, requiredEnv, splitList } from "./shared.mjs";
 
 // Blocks devices that use the hotspot without paying, through the Ruijie web
@@ -12,16 +11,22 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 // still active: in use (status 2) and not past its expiry time. A device whose
 // voucher has expired counts as unpaid, unless it expired less than 12 hours
 // ago (grace period for recent customers).
-// - Never had a voucher: blocked once it has used 20 MB or is moving more than
+// - Never had a voucher: blocked once it has used 10 MB or is moving more than
 //   50 kbps right now (the portal alone shouldn't let it do either).
 // - Had a voucher that has now expired: blocked only if it is moving more than
 //   50 kbps right now. Its data counter includes time it paid for, and a device
 //   that is just sitting on the portal must still be able to buy a new voucher.
 //
+// A portal sign-in still shown online 1 hour or more after its voucher expired
+// is kicked off (the console's "Kick Offline"), so the device must enter a new
+// voucher. Kicking only ends the portal session; it doesn't block the device.
+//
 // On SSIDs without the portal (password networks such as QikCam), at most
 // MAX_PASSWORD_DEVICES devices are allowed; newer extra devices are blocked.
 //
-// Every MAC this job blocks is recorded in KV and released at 00:00
+// Every MAC this job blocks is recorded in KV with how many times it has been
+// blocked. The block is lifted after 12 hours the first time, 24 hours the
+// second, 48 hours the third and 72 hours from then on
 // Africa/Harare. MACs blocked by hand in the console are never touched.
 
 export const BLOCKER_STATE_KEY = "blocker-state";
@@ -34,28 +39,43 @@ export const RULES = {
   // still treated as a customer (Ruijie can take a while to cut expired
   // vouchers off).
   expiryGraceHours: 12,
+  // A portal sign-in that is still online this long after its voucher expired
+  // is kicked off, so the device has to enter a new voucher to get back on.
+  kickAfterExpiryHours: 1,
+  maxKicksPerSitePerRun: 5,
   // Most expired-voucher lookups per site per run; devices past the limit are
   // left alone this run rather than blocked blind.
   maxExpiryLookupsPerSite: 4,
-  minDataBytes: 20 * 1024 * 1024,
+  minDataBytes: 10 * 1024 * 1024,
   liveRateBps: 50_000,
   liveRateMinConnectedMinutes: 10,
   maxPasswordDevices: 2,
   // Safety stop: if a site suddenly shows more than this many devices to block,
   // something is probably wrong with the data, so the site is skipped.
-  maxBlocksPerSitePerRun: 12,
+  maxBlocksPerSitePerRun: 25,
+  // Most blocks added per site per run, heaviest users first.
+  blocksPerSitePerRun: 12,
   portalSsidCacheHours: 6,
+  // How long a block lasts, by how many times the device has been blocked:
+  // 1st 12 h, 2nd 24 h, 3rd 48 h, 4th and later 72 h (the maximum).
+  blockHours: [12, 24, 48, 72],
+  // A device's offence count is forgotten after this many days without one.
+  offenceMemoryDays: 30,
+  // Requests kept back from releases so blocking carries on while a big batch
+  // of releases is spread over several runs.
+  siteCheckReserve: 30,
 };
 
 const HARARE_OFFSET_MINUTES = 120;
 
-export async function runBlocker(env, { live, release = false, fetchImpl = fetch, now = () => new Date() } = {}) {
+export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new Date() } = {}) {
   const budget = createBudget(undefined, fetchImpl);
   const startedAt = now();
   const report = {
     checkedAt: startedAt.toISOString(),
     live,
     released: [],
+    kicked: [],
     blocked: [],
     wouldBlock: [],
     sites: [],
@@ -84,23 +104,34 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
       await ruijie.login();
     }
     if (ruijie.loggedInThisRun) state.session = { cookies: ruijie.exportCookies(), at: now().toISOString() };
-    const openApi = createRuijieClient({
-      baseUrl: env.RUIJIE_API_BASE_URL,
-      appId: requiredEnv(env, "RUIJIE_API_APP_ID"),
-      secret: requiredEnv(env, "RUIJIE_API_SECRET"),
-      fetchImpl: budget.fetch,
-      retryDelayMs: env.RETRY_DELAY_MS == null ? 1_500 : Number(env.RETRY_DELAY_MS),
-    });
 
-    // 1. At 00:00 Harare, release everything this job blocked during the day.
-    if (release || state.pendingRelease?.length) {
-      if (release) {
-        state.pendingRelease = [...(state.pendingRelease ?? []), ...Object.values(state.blocked ?? {})];
-        state.blocked = {};
-      }
+    // First run with offence counts: seed them from the days already on record
+    // (each day a device was blocked counts once).
+    if (!state.offences) {
+      const lastDay = await env.STATE.get(BLOCKER_DAY_REPORT_KEY, "json");
+      state.offences = seedOffences([...(lastDay?.blocked ?? []), ...(state.day.blocked ?? [])]);
+    }
+    for (const entry of Object.values(state.blocked ?? {})) {
+      if (entry.releaseAt) continue;
+      state.offences[entry.mac] ??= { count: 1, last: startedAt.toISOString() };
+      // Time is counted from now, so an existing block lasts its full length.
+      entry.offence = state.offences[entry.mac].count;
+      entry.releaseAt = new Date(startedAt.getTime() + blockHours(entry.offence) * 3_600_000).toISOString();
+    }
+    const forgetBefore = new Date(startedAt.getTime() - RULES.offenceMemoryDays * 86_400_000).toISOString();
+    for (const [mac, offence] of Object.entries(state.offences)) if (offence.last < forgetBefore) delete state.offences[mac];
+
+    // 1. Release the blocks that have served their time.
+    const { due, keep } = dueBlocks(state.blocked ?? {}, startedAt);
+    if (due.length) {
+      state.pendingRelease = [...(state.pendingRelease ?? []), ...due];
+      state.blocked = keep;
+    }
+    if (state.pendingRelease?.length) {
       const still = [];
       for (const entry of state.pendingRelease) {
-        if (budget.remaining() < 6) {
+        // Leave enough requests to still check every site this run.
+        if (budget.remaining() < RULES.siteCheckReserve) {
           still.push(entry);
           continue;
         }
@@ -131,8 +162,9 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
         continue;
       }
       try {
-        const summary = await checkSite(ruijie, openApi, site, { state, allowList, now: startedAt });
+        const summary = await checkSite(ruijie, site, { state, allowList, now: startedAt });
         report.sites.push(summary.site);
+        await kickExpired(ruijie, summary.kicks, { live, report, budget });
         const targets = summary.targets;
         if (!targets.length) continue;
         if (!live) {
@@ -144,8 +176,24 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
           params: { type: "deny", macList: targets.map((target) => ({ mac: colonMac(target.mac) })) },
         });
         if (result.code !== 0) throw new Error(result.msg ?? `code ${result.code}`);
+        // A MAC blocked again before its release went through must not be
+        // released afterwards.
+        const reblocked = new Set(targets.map((target) => target.mac));
+        state.pendingRelease = (state.pendingRelease ?? []).filter((entry) => entry.groupId !== site.groupId || !reblocked.has(entry.mac));
         for (const target of targets) {
-          state.blocked[`${site.groupId}:${target.mac}`] = target;
+          const key = `${site.groupId}:${target.mac}`;
+          const serving = state.blocked[key];
+          if (serving) {
+            // Still serving a block (it was removed from the list by hand): keep its time.
+            target.offence = serving.offence;
+            target.releaseAt = serving.releaseAt;
+          } else {
+            const count = (state.offences[target.mac]?.count ?? 0) + 1;
+            state.offences[target.mac] = { count, last: startedAt.toISOString() };
+            target.offence = count;
+            target.releaseAt = new Date(startedAt.getTime() + blockHours(count) * 3_600_000).toISOString();
+          }
+          state.blocked[key] = target;
           report.blocked.push(target);
         }
       } catch (error) {
@@ -158,6 +206,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
 
   // Keep a running tally for the day-end report.
   state.day.blocked.push(...report.blocked.map(({ site, mac, reason, ssid }) => ({ site, mac, reason, ssid, at: report.checkedAt })));
+  state.day.kicked = (state.day.kicked ?? 0) + report.kicked.filter((kick) => !kick.dryRun).length;
   state.day.runs += 1;
   if (report.errors.length) state.day.errors += report.errors.length;
 
@@ -166,7 +215,7 @@ export async function runBlocker(env, { live, release = false, fetchImpl = fetch
   // report and the console session live inside the state record.
   state.lastReport = report;
   await env.STATE.put(BLOCKER_STATE_KEY, JSON.stringify(state));
-  log(`Blocker: ${report.blocked.length} blocked, ${report.wouldBlock.length} would block, ${report.released.length} released, ${report.errors.length} error(s), ${budget.used} requests.`);
+  log(`Blocker: ${report.kicked.length} kicked, ${report.blocked.length} blocked, ${report.wouldBlock.length} would block, ${report.released.length} released, ${report.errors.length} error(s), ${budget.used} requests.`);
   return report;
 }
 
@@ -180,6 +229,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     day: day.date,
     finishedAt: now().toISOString(),
     totalBlocked: day.blocked.length,
+    totalKicked: day.kicked ?? 0,
     bySite,
     runs: day.runs,
     errors: day.errors,
@@ -190,8 +240,9 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     `QikNet blocker report ${day.date}`,
     `Non-paying devices blocked: ${day.blocked.length}`,
     ...(lines.length ? lines : ["No devices blocked."]),
+    day.kicked ? `Expired vouchers kicked off the portal: ${day.kicked}` : null,
     day.errors ? `Errors during the day: ${day.errors}` : null,
-    "All blocks released at 00:00.",
+    "Blocks last 12h, 24h, 48h, then 72h for repeat offenders.",
   ].filter(Boolean).join("\n");
 
   if (sendSms) {
@@ -230,7 +281,7 @@ export async function listSites(ruijie) {
   }));
 }
 
-async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
+async function checkSite(ruijie, site, { state, allowList, now }) {
   const summary = { name: site.name, online: 0, paid: 0, unpaid: 0, toBlock: 0 };
   if (!site.online) return { site: { ...summary, skipped: "AP offline" }, targets: [] };
 
@@ -262,7 +313,7 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
   if (auth.code !== 0 || !Array.isArray(records)) throw new Error(`Voucher sign-in list failed: ${auth.msg ?? "no data"}`);
   const total = Number(auth.data.result.total ?? records.length);
   if (total > records.length) throw new Error(`Voucher sign-in list was cut short (${records.length} of ${total}); skipping to be safe.`);
-  const active = await activeVoucherCodes(openApi, site.groupId, now);
+  const active = await activeVoucherCodes(ruijie, site.groupId, now);
   const paidMacs = new Set(
     records.filter((record) => active.has(String(record.account ?? "").toLowerCase())).map((record) => normaliseMac(record.userMac)),
   );
@@ -275,26 +326,69 @@ async function checkSite(ruijie, openApi, site, { state, allowList, now }) {
     const mac = normaliseMac(record.userMac);
     if (paidMacs.has(mac) || !onlineMacs.has(mac)) continue;
     const previous = newestCode.get(mac);
-    if (!previous || Number(record.loginTimes) > previous.at) newestCode.set(mac, { code: record.account, at: Number(record.loginTimes) });
+    if (!previous || Number(record.loginTimes) > previous.at) newestCode.set(mac, { code: record.account, at: Number(record.loginTimes), record });
   }
   let lookups = 0;
-  for (const [mac, { code }] of newestCode) {
+  const kicks = [];
+  for (const [mac, { code, record }] of newestCode) {
     if (lookups >= RULES.maxExpiryLookupsPerSite) {
       paidMacs.add(mac); // not checked this run, so don't risk blocking a customer
       continue;
     }
     lookups += 1;
-    const expiry = await voucherExpiry(openApi, site.groupId, code);
+    const expiry = await voucherExpiry(ruijie, site.groupId, code);
     if (expiry == null || expiry > now.getTime() - RULES.expiryGraceHours * 3_600_000) paidMacs.add(mac);
+    if (shouldKick(record, expiry, now) && kicks.length < RULES.maxKicksPerSitePerRun) {
+      kicks.push({ site: site.name, groupId: site.groupId, mac, code, expiredHoursAgo: Math.round(((now.getTime() - expiry) / 3_600_000) * 10) / 10, record });
+    }
   }
 
   const expiredMacs = new Set(records.map((record) => normaliseMac(record.userMac)).filter((mac) => !paidMacs.has(mac)));
-  const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked: state.blocked ?? {}, now });
+  // What the console's blocklist actually holds right now. Entries can be
+  // removed by hand in the console, so a device blocked earlier may be back
+  // online and must be blocked again.
+  const blocklist = await ruijie.api(`/homescene/mac_filter/${site.groupId}`);
+  if (blocklist.code !== 0 || !Array.isArray(blocklist.list)) throw new Error(`Blocklist read failed: ${blocklist.msg ?? "no data"}`);
+  const alreadyBlocked = Object.fromEntries(blocklist.list.map((entry) => [`${site.groupId}:${normaliseMac(entry.mac)}`, true]));
+  summary.listed = blocklist.list.length;
+  const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked, now });
   Object.assign(summary, decision.counts);
   if (decision.targets.length > RULES.maxBlocksPerSitePerRun) {
     throw new Error(`${decision.targets.length} devices to block is above the safety limit of ${RULES.maxBlocksPerSitePerRun}; nothing blocked at this site.`);
   }
-  return { site: summary, targets: decision.targets };
+  const targets = [...decision.targets].sort((a, b) => b.usedMb - a.usedMb).slice(0, RULES.blocksPerSitePerRun);
+  summary.toKick = kicks.length;
+  return { site: summary, targets, kicks };
+}
+
+// A sign-in should be kicked when the portal still shows it online although its
+// voucher expired at least kickAfterExpiryHours ago.
+export function shouldKick(record, expiry, now) {
+  if (Number(record?.onlineStatus) !== 1 || !(expiry > 0)) return false;
+  return now.getTime() - expiry >= RULES.kickAfterExpiryHours * 3_600_000;
+}
+
+// Ends portal sessions whose voucher has expired, the same as the console's
+// "Kick Offline" button. The device stays connected to the Wi-Fi but has to
+// enter a new voucher on the portal.
+async function kickExpired(ruijie, kicks, { live, report, budget }) {
+  for (const { record, ...kick } of kicks ?? []) {
+    if (!live) {
+      report.kicked.push({ ...kick, dryRun: true });
+      continue;
+    }
+    if (budget.remaining() < 5) break;
+    try {
+      const result = await ruijie.api("/samTransfer/kick/user/offline", {
+        method: "POST",
+        params: { group_id: kick.groupId, account: record.account, auth_type: record.authType, mac: record.userMac, id: record.id },
+      });
+      if (result.code !== 0) throw new Error(result.msg ?? `code ${result.code}`);
+      report.kicked.push(kick);
+    } catch (error) {
+      report.errors.push({ site: kick.site, mac: kick.mac, message: `Kick failed: ${formatError(error)}` });
+    }
+  }
 }
 
 // Pure decision logic, kept separate so it can be tested.
@@ -360,30 +454,27 @@ function target(site, client, mac, ssid, reason) {
   };
 }
 
+// Voucher lists come from the web console rather than the open API: the open
+// API has a request quota ("Too many requests", code 44) that the blocker used
+// up on 2026-11-06, which also starves the station monitor and stock sync.
+async function consoleVouchers(ruijie, groupId, querys) {
+  const result = await ruijie.api(`/intlSamVoucher/getList/${encodeURIComponent(ruijie.user)}/${encodeURIComponent(groupId)}`, { querys });
+  if (result.code !== 0 || !Array.isArray(result.voucherData?.list)) {
+    throw new Error(`Voucher list failed: ${result.msg ?? result.voucherData?.msg ?? "no data"}`);
+  }
+  return result.voucherData.list;
+}
+
 // Vouchers that are in use (status 2) and not yet expired. A voucher without an
 // expiry time (such as Staff) counts as active.
-async function activeVoucherCodes(openApi, groupId, now) {
-  openApi.identity ??= openApi.request("/service/api/org/account/info");
-  const identity = await openApi.identity;
-  if (!identity.account) throw new Error("Ruijie API account lookup failed.");
-  const result = await openApi.request(
-    `/service/api/intlSamVoucher/getList/${encodeURIComponent(identity.account)}/${encodeURIComponent(groupId)}`,
-    { params: { start: 0, pageSize: 1000, status: 2 } },
-  );
-  const list = result.voucherData?.list;
-  if (!Array.isArray(list)) throw new Error("Active voucher list was missing; skipping this site to be safe.");
-  return activeCodes(list, now);
+async function activeVoucherCodes(ruijie, groupId, now) {
+  return activeCodes(await consoleVouchers(ruijie, groupId, { start: 0, pageSize: 1000, status: 2 }), now);
 }
 
 // Expiry time (ms) of one voucher, or null if it has none or can't be found.
-async function voucherExpiry(openApi, groupId, code) {
-  openApi.identity ??= openApi.request("/service/api/org/account/info");
-  const identity = await openApi.identity;
-  const result = await openApi.request(
-    `/service/api/intlSamVoucher/getList/${encodeURIComponent(identity.account)}/${encodeURIComponent(groupId)}`,
-    { params: { start: 0, pageSize: 10, name: code } },
-  );
-  const voucher = (result.voucherData?.list ?? []).find((entry) => String(entry.voucherCode).toLowerCase() === String(code).toLowerCase());
+async function voucherExpiry(ruijie, groupId, code) {
+  const list = await consoleVouchers(ruijie, groupId, { start: 0, pageSize: 10, name: code });
+  const voucher = list.find((entry) => String(entry.voucherCode).toLowerCase() === String(code).toLowerCase());
   const expiry = Number(voucher?.expiryTime);
   return expiry > 0 ? expiry : null;
 }
@@ -422,6 +513,36 @@ function newDay(at) {
 export function isHarareMidnight(date) {
   const harare = new Date(date.getTime() + HARARE_OFFSET_MINUTES * 60_000);
   return harare.getUTCHours() === 0 && harare.getUTCMinutes() < 5;
+}
+
+// Offence counts from earlier block records: one per Harare day blocked.
+export function seedOffences(records) {
+  const days = {};
+  for (const record of records) {
+    if (!record?.mac || !record.at) continue;
+    (days[record.mac] ??= new Set()).add(harareDate(new Date(record.at)));
+  }
+  const offences = {};
+  for (const [mac, set] of Object.entries(days)) {
+    offences[mac] = { count: set.size, last: new Date().toISOString() };
+  }
+  return offences;
+}
+
+// Hours a block lasts for a device's nth offence.
+export function blockHours(count) {
+  return RULES.blockHours[Math.min(Math.max(count, 1), RULES.blockHours.length) - 1];
+}
+
+// Splits recorded blocks into those whose time is up and those that stay.
+export function dueBlocks(blocked, now) {
+  const due = [];
+  const keep = {};
+  for (const [key, entry] of Object.entries(blocked)) {
+    if (entry.releaseAt && Date.parse(entry.releaseAt) <= now.getTime()) due.push(entry);
+    else keep[key] = entry;
+  }
+  return { due, keep };
 }
 
 function harareDate(date) {

@@ -103,12 +103,12 @@ The GitHub Actions workflows remain for manual runs only. Their schedules are of
 `src/blocker.mjs` runs every 5 minutes (`*/5 * * * *`), reusing its console session between runs. It signs in to the Ruijie web console (`src/console.mjs`, needs the `RUIJIE_WEB_USER` and `RUIJIE_WEB_PASSWORD` secrets) and, for each site:
 
 - counts a device on a portal SSID as **paid** only if its MAC signed in within the last 7 days with a voucher that is still active (status 2 and not past its expiry), or its voucher expired less than 12 hours ago (grace period);
-- blocks an unpaid device that never had a voucher once it has used 20 MB or is moving more than 50 kbps;
+- blocks an unpaid device that never had a voucher once it has used 10 MB or is moving more than 50 kbps;
 - blocks a device whose voucher expired only while it is moving more than 50 kbps (so it can still reach the portal to buy again);
 - on password SSIDs without the portal (QikCam, VIP2), keeps the two oldest devices and blocks extras;
 - skips a site if any lookup fails or more than 12 devices would be blocked at once.
 
-The 22:00 UTC run (00:00 Africa/Harare) sends one day-end SMS report (`BLOCKER_REPORT_SMS`, to `BLOCKER_REPORT_RECIPIENT` or else `STOCK_REPORT_RECIPIENT`), releases every MAC this job blocked, then checks again straight away. MACs blocked by hand are never touched. `BLOCKER_ALLOW_MACS` (comma-separated) is never blocked. `BLOCKER_LIVE = "false"` makes it report only. Manual run: `POST /run/blocker?live=false`.
+The 22:00 UTC run (00:00 Africa/Harare) sends one day-end SMS report (`BLOCKER_REPORT_SMS`, to `BLOCKER_REPORT_RECIPIENT` or else `STOCK_REPORT_RECIPIENT`), and every run lifts blocks whose time is up: 12 hours for a first offence, 24 for the second, 48 for the third and 72 from then on (counts kept per MAC for 30 days). Each run reads the real console blocklist and re-blocks anyone who has been removed from it. MACs blocked by hand are never touched. `BLOCKER_ALLOW_MACS` (comma-separated) is never blocked. `BLOCKER_LIVE = "false"` makes it report only. Manual run: `POST /run/blocker?live=false`.
 
 ## Station alerts
 
