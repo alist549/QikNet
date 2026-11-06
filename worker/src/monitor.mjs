@@ -5,6 +5,12 @@ import { createBudget, formatError, log, requiredEnv, splitList } from "./shared
 
 export const STATE_KEY = "station-state";
 export const MONITOR_REPORT_KEY = "last-monitor-report";
+export const GROUPS_KEY = "monitor-groups";
+export const TOKEN_KEY = "monitor-ruijie-token";
+const TOKEN_TTL_SECONDS = 50 * 60;
+export const BACKOFF_KEY = "monitor-backoff-until";
+// After Ruijie says "too many requests", skip checks for this long.
+const RATE_LIMIT_BACKOFF_MINUTES = 30;
 
 const COMPONENT_TYPES = [
   ["AP", "AP"],
@@ -103,6 +109,14 @@ export async function runMonitor(env, { sendSms, fetchImpl = fetch, now = () => 
     }
   };
 
+  const backoffUntil = await env.STATE.get(BACKOFF_KEY);
+  if (backoffUntil && Date.parse(backoffUntil) > checkedAtDate.getTime()) {
+    report.skipped = `Ruijie rate limit: checks paused until ${backoffUntil}.`;
+    await env.STATE.put(MONITOR_REPORT_KEY, JSON.stringify(report));
+    log(`Monitor skipped: ${report.skipped}`);
+    return report;
+  }
+
   try {
     const ruijie = createRuijieClient({
       baseUrl: env.RUIJIE_API_BASE_URL,
@@ -110,8 +124,12 @@ export async function runMonitor(env, { sendSms, fetchImpl = fetch, now = () => 
       secret: requiredEnv(env, "RUIJIE_API_SECRET"),
       fetchImpl: budget.fetch,
       retryDelayMs: env.RETRY_DELAY_MS == null ? 1_500 : Number(env.RETRY_DELAY_MS),
+      tokenCache: {
+        get: () => env.STATE.get(TOKEN_KEY),
+        put: (token) => env.STATE.put(TOKEN_KEY, token, { expirationTtl: TOKEN_TTL_SECONDS }),
+      },
     });
-    const stations = await readStations(ruijie);
+    const stations = await readStations(ruijie, { env, previousStations: previousState.stations ?? {}, day });
     const entries = stations.map((station) => {
       const recipients = recipientsFor(station.branchName, defaultRecipients, specialRecipient);
       const previous = migrate(previousState.stations?.[station.projectName] ?? {}, recipients);
@@ -123,6 +141,8 @@ export async function runMonitor(env, { sendSms, fetchImpl = fetch, now = () => 
           branchName: station.branchName,
           status: station.status,
           components: station.components,
+          deviceTypes: station.deviceTypes,
+          typesDay: station.typesDay,
           failingChecks: failing ? previous.failingChecks + 1 : 0,
           upChecks: failing ? 0 : previous.upChecks + 1,
           incident: previous.incident,
@@ -209,6 +229,11 @@ export async function runMonitor(env, { sendSms, fetchImpl = fetch, now = () => 
   } catch (error) {
     report.errors.push({ message: formatError(error) });
     log(`Station monitor failed: ${formatError(error)}`);
+    if (error.rateLimited) {
+      const until = new Date(checkedAtDate.getTime() + RATE_LIMIT_BACKOFF_MINUTES * 60_000).toISOString();
+      await env.STATE.put(BACKOFF_KEY, until);
+      report.backoffUntil = until;
+    }
   }
 
   report.subrequests = budget.used;
@@ -249,19 +274,30 @@ function addNotified(incident, recipient) {
   if (!incident.notified.includes(masked)) incident.notified = [...incident.notified, masked].sort();
 }
 
-async function readStations(ruijie) {
+// Keeps Ruijie open-API use low (it rate-limits the whole account): project ids
+// come from a daily KV cache instead of the tree on every run, and each station is
+// only asked about the device types it has (AP, bridge...). All four types are
+// rediscovered once a day, so new kinds of device are picked up within a day.
+async function readStations(ruijie, { env, previousStations, day }) {
+  const groups = await projectGroups(ruijie, env, day);
   const stations = [];
   for (const branch of config.branches.filter((entry) => entry.enabled)) {
-    const groupId = await ruijie.monitorProjectId(branch.ruijieProject);
+    const groupId = groups[branch.ruijieProject];
     if (groupId == null) throw new Error(`Ruijie API project was not found: ${branch.ruijieProject}.`);
+    const previous = previousStations[branch.ruijieProject] ?? {};
+    const known = previous.typesDay === day && Array.isArray(previous.deviceTypes) && previous.deviceTypes.length
+      ? COMPONENT_TYPES.filter(([type]) => previous.deviceTypes.includes(type))
+      : COMPONENT_TYPES;
     const components = [];
-    for (const [commonType, name] of COMPONENT_TYPES) {
+    const deviceTypes = [];
+    for (const [commonType, name] of known) {
       const result = await ruijie.request("/service/api/maint/devices", {
         params: { common_type: commonType, group_id: groupId, page: 1, per_page: 100 },
         attempts: 2,
       });
       const devices = result.deviceList ?? result.data?.list ?? result.dataList ?? result.list ?? [];
       if (!devices.length) continue;
+      deviceTypes.push(commonType);
       const online = devices.filter((device) => String(device.onlineStatus ?? device.status ?? "").toUpperCase() === "ON").length;
       components.push({ name, online, total: devices.length });
     }
@@ -269,9 +305,23 @@ async function readStations(ruijie) {
     const offline = components.some((component) => component.online === 0 && component.total > 0);
     const degraded = components.some((component) => component.online < component.total);
     const status = offline ? "down" : degraded ? "degraded" : "up";
-    stations.push({ branchName: branch.qiknetName, projectName: branch.ruijieProject, status, components });
+    const typesDay = known === COMPONENT_TYPES ? day : previous.typesDay;
+    stations.push({ branchName: branch.qiknetName, projectName: branch.ruijieProject, status, components, deviceTypes, typesDay });
   }
   return stations;
+}
+
+async function projectGroups(ruijie, env, day) {
+  const wanted = config.branches.filter((entry) => entry.enabled).map((entry) => entry.ruijieProject);
+  const cached = await env.STATE.get(GROUPS_KEY, "json");
+  if (cached?.day === day && wanted.every((name) => cached.ids?.[name] != null)) return cached.ids;
+  const ids = {};
+  for (const name of wanted) {
+    const groupId = await ruijie.monitorProjectId(name);
+    if (groupId != null) ids[name] = groupId;
+  }
+  await env.STATE.put(GROUPS_KEY, JSON.stringify({ day, ids }));
+  return ids;
 }
 
 function recipientsFor(branchName, defaultRecipients, specialRecipient) {

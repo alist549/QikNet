@@ -340,3 +340,36 @@ test("manual endpoints require the token and refuse an unconfirmed live sync", a
   const live = await worker.fetch(new Request("https://w.example/run/sync?dry_run=false", { method: "POST", headers }), env);
   assert.equal(live.status, 400);
 });
+
+test("after the first check of the day, a monitor run asks only for device types each station has", async () => {
+  const env = baseEnv(QUIET);
+  const apis = fakeApis({});
+  const first = await runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at("2026-11-05T08:00:00Z") });
+  assert.deepEqual(first.errors, []);
+  const before = apis.calls.length;
+  const second = await runMonitor(env, { sendSms: true, fetchImpl: apis.fetchImpl, now: at("2026-11-05T08:30:00Z") });
+  assert.deepEqual(second.errors, []);
+  const used = apis.calls.slice(before);
+  assert.equal(used.filter((call) => call.includes("access_token")).length, 0, "token is reused");
+  assert.equal(used.filter((call) => call.includes("/group/single/tree")).length, 0, "project ids are cached");
+  // The fake gives every station APs, switches and gateways but no bridge, so the
+  // bridge lookup is skipped for the rest of the day.
+  assert.equal(used.length, enabled.length * 3, `used ${used.length}`);
+});
+
+test("a Ruijie rate limit pauses checks for 30 minutes without retrying", async () => {
+  const env = baseEnv(QUIET);
+  let calls = 0;
+  const fetchImpl = async (input) => {
+    calls += 1;
+    const url = new URL(String(input));
+    if (url.pathname.endsWith("/oauth20/client/access_token")) return new Response(JSON.stringify({ code: 0, accessToken: "t" }));
+    return new Response(JSON.stringify({ code: 44, msg: "Too many requests" }));
+  };
+  const first = await runMonitor(env, { sendSms: true, fetchImpl, now: at("2026-11-05T08:00:00Z") });
+  assert.equal(calls, 2, "one token call, one rate-limited call, no retries");
+  assert.equal(first.backoffUntil, "2026-11-05T08:30:00.000Z");
+  const paused = await runMonitor(env, { sendSms: true, fetchImpl, now: at("2026-11-05T08:15:00Z") });
+  assert.match(paused.skipped, /paused/);
+  assert.equal(calls, 2);
+});
