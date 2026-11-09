@@ -47,9 +47,6 @@ export const RULES = {
   // left alone this run rather than blocked blind.
   maxExpiryLookupsPerSite: 4,
   minDataBytes: 10 * 1024 * 1024,
-  // Devices blocked before (offence on record) get a much lower limit: they
-  // have shown they can get online without a voucher.
-  repeatOffenderDataBytes: 2 * 1024 * 1024,
   liveRateBps: 50_000,
   liveRateMinConnectedMinutes: 10,
   maxPasswordDevices: 2,
@@ -427,7 +424,7 @@ async function checkSite(ruijie, site, { state, allowList, now }) {
   if (blocklist.code !== 0 || !Array.isArray(blocklist.list)) throw new Error(`Blocklist read failed: ${blocklist.msg ?? "no data"}`);
   const alreadyBlocked = Object.fromEntries(blocklist.list.map((entry) => [`${site.groupId}:${normaliseMac(entry.mac)}`, true]));
   summary.listed = blocklist.list.length;
-  const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked, offences: state.offences ?? {}, now });
+  const decision = decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs, allowList, alreadyBlocked, now });
   Object.assign(summary, decision.counts);
   if (decision.targets.length > RULES.maxBlocksPerSitePerRun) {
     throw new Error(`${decision.targets.length} devices to block is above the safety limit of ${RULES.maxBlocksPerSitePerRun}; nothing blocked at this site.`);
@@ -468,7 +465,7 @@ async function kickExpired(ruijie, kicks, { live, report, budget }) {
 }
 
 // Pure decision logic, kept separate so it can be tested.
-export function decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs = new Set(), allowList, alreadyBlocked = {}, offences = {}, now }) {
+export function decideTargets(clients, { site, portalSsids, paidMacs, expiredMacs = new Set(), allowList, alreadyBlocked = {}, now }) {
   const counts = { paid: 0, unpaid: 0, toBlock: 0 };
   const targets = [];
   const portal = new Set(portalSsids);
@@ -495,9 +492,7 @@ export function decideTargets(clients, { site, portalSsids, paidMacs, expiredMac
         const expired = expiredMacs.has(mac);
         const label = expired ? "voucher expired" : "no voucher";
         const reasons = [];
-        const repeat = Number(offences[mac]?.count ?? 0) > 0;
-        const dataLimit = repeat ? RULES.repeatOffenderDataBytes : RULES.minDataBytes;
-        if (!expired && usedBytes >= dataLimit) reasons.push(`used ${Math.round(usedBytes / 1048576)} MB, ${label}${repeat ? ", blocked before" : ""}`);
+        if (!expired && usedBytes >= RULES.minDataBytes) reasons.push(`used ${Math.round(usedBytes / 1048576)} MB, ${label}`);
         if (rate > RULES.liveRateBps && connectedMinutes >= RULES.liveRateMinConnectedMinutes) {
           reasons.push(`${Math.round(rate / 1000)} kbps right now, ${label}`);
         }
