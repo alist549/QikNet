@@ -146,3 +146,39 @@ test("health alert: one SMS after 3 failed runs, one when it recovers", async ()
   assert.equal(sent.length, 2);
   assert.equal(state.health.failures, 0);
 });
+
+test("a voucher in use on any site counts as paid; unknown or expired codes don't", async () => {
+  const { isPaidRecord } = await import("../src/blocker.mjs");
+  const vouchers = new Map([
+    ["abc123", { site: "Unit O", status: 2, pkg: "QikNetDailyVoucher6hrs", expiry: now.getTime() + 3_600_000 }],
+    ["old111", { site: "Unit O", status: 2, pkg: "QikNetDailyVoucher", expiry: now.getTime() - 60_000 }],
+    ["staff1", { site: "Jambanja", status: 2, pkg: "STAFF", expiry: null }],
+  ]);
+  assert.equal(isPaidRecord({ account: "ABC123", authType: "15" }, vouchers, now), true);
+  assert.equal(isPaidRecord({ account: "old111", authType: "15" }, vouchers, now), false);
+  assert.equal(isPaidRecord({ account: "wywmzf", authType: "15" }, vouchers, now), false);
+  assert.equal(isPaidRecord({ account: "staff1", authType: "15" }, vouchers, now), true);
+  assert.equal(isPaidRecord({ account: "Qiknetstaff", authType: "1" }, vouchers, now), true);
+});
+
+test("staff watch flags a code used on more devices than allowed", async () => {
+  const { watchStaff, staffFlags, staffReportLines } = await import("../src/blocker.mjs");
+  const vouchers = new Map([
+    ["staff1", { site: "Jambanja", status: 2, pkg: "STAFF", expiry: null, maxClients: 1 }],
+    ["sold01", { site: "Unit N", status: 2, pkg: "QikNetDailyVoucher", expiry: null, maxClients: 1 }],
+  ]);
+  const at = String(now.getTime() - 3_600_000);
+  const records = [
+    { account: "staff1", authType: "15", userMac: "aaaa.aaaa.0001", loginTimes: at },
+    { account: "staff1", authType: "15", userMac: "aaaa.aaaa.0002", loginTimes: at },
+    { account: "sold01", authType: "15", userMac: "aaaa.aaaa.0003", loginTimes: at },
+    { account: "Qiknetstaff", authType: "1", userMac: "aaaa.aaaa.0004", loginTimes: at },
+  ];
+  const state = {};
+  watchStaff(state, { name: "Unit C" }, records, vouchers, [], now);
+  assert.deepEqual(Object.keys(state.staff).sort(), ["Qiknetstaff", "staff1"]);
+  const flags = staffFlags(state.staff);
+  assert.deepEqual(flags.overLimit.map((flag) => [flag.code, flag.devices, flag.limit]), [["staff1", 2, 1]]);
+  assert.deepEqual(flags.awayFromHome.map((flag) => [flag.code, flag.sites]), [["staff1", ["Unit C"]]]);
+  assert.ok(staffReportLines(state.staff).some((line) => line.startsWith("OVER LIMIT staff1")));
+});

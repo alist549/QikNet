@@ -46,6 +46,15 @@ export const RULES = {
   // Most expired-voucher lookups per site per run; devices past the limit are
   // left alone this run rather than blocked blind.
   maxExpiryLookupsPerSite: 4,
+  // Voucher searches (one per site searched) allowed per site per run when a
+  // code isn't in any site's in-use list.
+  maxSearchRequestsPerSite: 8,
+  // A code that wasn't found on any site is searched for again after this long.
+  missingVoucherRecheckHours: 6,
+  // Staff watch: devices allowed per staff code over 7 days when the voucher
+  // itself doesn't say (account sign-ins such as "Qiknetstaff").
+  staffDefaultMaxDevices: 2,
+  staffWindowDays: 7,
   minDataBytes: 10 * 1024 * 1024,
   liveRateBps: 50_000,
   liveRateMinConnectedMinutes: 10,
@@ -176,13 +185,17 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
 
     // 2. Check every site.
     const sites = ruijie.sites ?? (await listSites(ruijie));
+    // Vouchers work on every site, so in-use vouchers are read from all sites
+    // (offline ones too) before any site is checked.
+    const vouchers = await inUseVouchers(ruijie, sites);
+    pruneVoucherCache(state, startedAt);
     for (const site of sites) {
       if (budget.remaining() < 5) {
         report.errors.push({ site: site.name, message: "Skipped: out of request budget for this run." });
         continue;
       }
       try {
-        const summary = await checkSite(ruijie, site, { state, allowList, now: startedAt });
+        const summary = await checkSite(ruijie, site, { state, allowList, vouchers, sites, now: startedAt });
         report.sites.push(summary.site);
         await kickExpired(ruijie, summary.kicks, { live, report, budget });
         const targets = summary.targets;
@@ -230,6 +243,7 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
   state.day.runs += 1;
   if (report.errors.length) state.day.errors += report.errors.length;
 
+  await alertStaff(env, state, report, fetchImpl);
   await checkHealth(env, state, report, { fetchImpl });
 
   report.subrequests = budget.used;
@@ -264,6 +278,7 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
     ...(lines.length ? lines : ["No devices blocked."]),
     day.kicked ? `Expired vouchers kicked off the portal: ${day.kicked}` : null,
     day.errors ? `Errors during the day: ${day.errors}` : null,
+    ...staffReportLines(state.staff),
     "Blocks last 12h, 24h, 48h, then 72h for repeat offenders.",
   ].filter(Boolean).join("\n");
 
@@ -291,6 +306,17 @@ export async function finishBlockerDay(env, { sendSms, fetchImpl = fetch, now = 
   await env.STATE.put(BLOCKER_STATE_KEY, JSON.stringify(state));
   await env.STATE.put(BLOCKER_DAY_REPORT_KEY, JSON.stringify(summary));
   return summary;
+}
+
+export function staffReportLines(staff = {}) {
+  const codes = Object.keys(staff);
+  if (!codes.length) return [];
+  const { overLimit, awayFromHome } = staffFlags(staff);
+  return [
+    `Staff codes used (7 days): ${codes.length}`,
+    ...overLimit.map((flag) => `OVER LIMIT ${flag.code} (${flag.pkg}): ${flag.devices} devices, limit ${flag.limit}`),
+    ...awayFromHome.map((flag) => `${flag.code} (${flag.homeSite}) used at ${flag.sites.join(", ")}`),
+  ];
 }
 
 // Sends one SMS when runs have kept failing and one when they work again.
@@ -354,7 +380,7 @@ export async function listSites(ruijie) {
   }));
 }
 
-async function checkSite(ruijie, site, { state, allowList, now }) {
+async function checkSite(ruijie, site, { state, allowList, vouchers = new Map(), sites = [], now }) {
   const summary = { name: site.name, online: 0, paid: 0, unpaid: 0, toBlock: 0 };
   if (!site.online) return { site: { ...summary, skipped: "AP offline" }, targets: [] };
 
@@ -386,10 +412,10 @@ async function checkSite(ruijie, site, { state, allowList, now }) {
   if (auth.code !== 0 || !Array.isArray(records)) throw new Error(`Voucher sign-in list failed: ${auth.msg ?? "no data"}`);
   const total = Number(auth.data.result.total ?? records.length);
   if (total > records.length) throw new Error(`Voucher sign-in list was cut short (${records.length} of ${total}); skipping to be safe.`);
-  const active = await activeVoucherCodes(ruijie, site.groupId, now);
   const paidMacs = new Set(
-    records.filter((record) => active.has(String(record.account ?? "").toLowerCase())).map((record) => normaliseMac(record.userMac)),
+    records.filter((record) => isPaidRecord(record, vouchers, now)).map((record) => normaliseMac(record.userMac)),
   );
+  watchStaff(state, site, records, vouchers, clients, now);
 
   // Devices online now whose recent voucher(s) are no longer active: look up
   // when the newest one expired, and keep them as customers inside the grace period.
@@ -402,14 +428,22 @@ async function checkSite(ruijie, site, { state, allowList, now }) {
     if (!previous || Number(record.loginTimes) > previous.at) newestCode.set(mac, { code: record.account, at: Number(record.loginTimes), record });
   }
   let lookups = 0;
+  const search = { requests: 0 };
   const kicks = [];
   for (const [mac, { code, record }] of newestCode) {
-    if (lookups >= RULES.maxExpiryLookupsPerSite) {
+    if (lookups >= RULES.maxExpiryLookupsPerSite || search.requests >= RULES.maxSearchRequestsPerSite) {
       paidMacs.add(mac); // not checked this run, so don't risk blocking a customer
       continue;
     }
     lookups += 1;
-    const expiry = await voucherExpiry(ruijie, site.groupId, code);
+    const found = await findVoucher(ruijie, code, { site, sites, vouchers, state, now, search });
+    if (found.unknown) {
+      paidMacs.add(mac); // search cut short: leave it for the next run
+      continue;
+    }
+    // A code that no site knows about (deleted, or never ours) is not a paid voucher.
+    if (found.missing) continue;
+    const expiry = found.expiry;
     if (expiry == null || expiry > now.getTime() - RULES.expiryGraceHours * 3_600_000) paidMacs.add(mac);
     if (shouldKick(record, expiry, now) && kicks.length < RULES.maxKicksPerSitePerRun) {
       kicks.push({ site: site.name, groupId: site.groupId, mac, code, expiredHoursAgo: Math.round(((now.getTime() - expiry) / 3_600_000) * 10) / 10, record });
@@ -538,18 +572,153 @@ async function consoleVouchers(ruijie, groupId, querys) {
   return result.voucherData.list;
 }
 
-// Vouchers that are in use (status 2) and not yet expired. A voucher without an
-// expiry time (such as Staff) counts as active.
-async function activeVoucherCodes(ruijie, groupId, now) {
-  return activeCodes(await consoleVouchers(ruijie, groupId, { start: 0, pageSize: 1000, status: 2 }), now);
+// In-use (status 2) vouchers on every site: code -> { site, groupId, pkg,
+// expiry (ms or null), maxClients }. A site whose list can't be read is skipped.
+async function inUseVouchers(ruijie, sites) {
+  const index = new Map();
+  for (const site of sites) {
+    let list;
+    try {
+      list = await consoleVouchers(ruijie, site.groupId, { start: 0, pageSize: 1000, status: 2 });
+    } catch {
+      continue;
+    }
+    for (const voucher of list) indexVoucher(index, voucher, site);
+  }
+  return index;
 }
 
-// Expiry time (ms) of one voucher, or null if it has none or can't be found.
-async function voucherExpiry(ruijie, groupId, code) {
-  const list = await consoleVouchers(ruijie, groupId, { start: 0, pageSize: 10, name: code });
-  const voucher = list.find((entry) => String(entry.voucherCode).toLowerCase() === String(code).toLowerCase());
-  const expiry = Number(voucher?.expiryTime);
-  return expiry > 0 ? expiry : null;
+function indexVoucher(index, voucher, site) {
+  const code = String(voucher.voucherCode ?? "").toLowerCase();
+  if (!code) return;
+  const expiry = Number(voucher.expiryTime);
+  index.set(code, {
+    site: site.name,
+    groupId: site.groupId,
+    pkg: String(voucher.packageName ?? ""),
+    status: Number(voucher.status),
+    expiry: expiry > 0 ? expiry : null,
+    maxClients: Number(voucher.maxClients) || null,
+  });
+}
+
+// Voucher sign-ins (authType 15) are paid while the voucher is in use and not
+// expired on any site. Other sign-in types (accounts such as "Qiknetstaff") are
+// set up by hand in the console, so they count as paid; the staff watch
+// keeps an eye on them.
+export function isPaidRecord(record, vouchers, now) {
+  if (String(record?.authType ?? "15") !== "15") return true;
+  const voucher = vouchers.get(String(record?.account ?? "").toLowerCase());
+  if (!voucher || voucher.status !== 2) return false;
+  return !(voucher.expiry && voucher.expiry <= now.getTime());
+}
+
+// Finds a voucher by code: the in-use list first, then a search of this site
+// and every other site. Returns { expiry } when found, { missing: true } when no
+// site has it, or { unknown: true } when the search ran out of requests.
+// Results are cached in state.voucherCache (expired vouchers never change).
+async function findVoucher(ruijie, code, { site, sites, vouchers, state, now, search }) {
+  const key = String(code ?? "").toLowerCase();
+  const inUse = vouchers.get(key);
+  if (inUse) return { expiry: inUse.expiry };
+  const cache = (state.voucherCache ??= {});
+  const cached = cache[key];
+  if (cached && !cached.missing) return { expiry: cached.expiry };
+  if (cached?.missing && now.getTime() - Date.parse(cached.at) < RULES.missingVoucherRecheckHours * 3_600_000) return { missing: true };
+  const order = [site, ...sites.filter((other) => other.groupId !== site.groupId)];
+  for (const where of order) {
+    if (search.requests >= RULES.maxSearchRequestsPerSite) return { unknown: true };
+    search.requests += 1;
+    const list = await consoleVouchers(ruijie, where.groupId, { start: 0, pageSize: 10, name: code });
+    const voucher = list.find((entry) => String(entry.voucherCode).toLowerCase() === key);
+    if (voucher) {
+      const expiry = Number(voucher.expiryTime) > 0 ? Number(voucher.expiryTime) : null;
+      cache[key] = { expiry, site: where.name, at: now.toISOString() };
+      return { expiry };
+    }
+  }
+  cache[key] = { missing: true, at: now.toISOString() };
+  return { missing: true };
+}
+
+function pruneVoucherCache(state, now) {
+  const cutoff = now.getTime() - (RULES.paidWindowDays + 1) * 86_400_000;
+  for (const [code, entry] of Object.entries(state.voucherCache ?? {})) if (Date.parse(entry.at) < cutoff) delete state.voucherCache[code];
+}
+
+// Staff watch. A staff code is a sign-in that isn't a sold QikNet voucher:
+// a voucher whose package isn't "QikNet…" (Staff, Vendors, AgentUnlimited) or an
+// account sign-in. Each code's devices over the last 7 days are kept in
+// state.staff so codes shared with too many devices can be flagged.
+export function staffCode(record, vouchers) {
+  const code = String(record?.account ?? "");
+  if (!code) return null;
+  if (String(record.authType ?? "15") !== "15") return { code, pkg: "Account", homeSite: null, limit: RULES.staffDefaultMaxDevices };
+  const voucher = vouchers.get(code.toLowerCase());
+  if (!voucher || /^qiknet/i.test(voucher.pkg)) return null;
+  return { code, pkg: voucher.pkg, homeSite: voucher.site, limit: voucher.maxClients || RULES.staffDefaultMaxDevices };
+}
+
+export function watchStaff(state, site, records, vouchers, clients, now) {
+  const staff = (state.staff ??= {});
+  const online = new Map(clients.map((client) => [normaliseMac(client.mac), client]));
+  for (const record of records) {
+    const info = staffCode(record, vouchers);
+    if (!info) continue;
+    const entry = (staff[info.code] ??= { pkg: info.pkg, homeSite: info.homeSite, limit: info.limit, devices: {} });
+    Object.assign(entry, { pkg: info.pkg, homeSite: info.homeSite, limit: info.limit });
+    const mac = normaliseMac(record.userMac);
+    const at = new Date(Number(record.loginTimes) || now.getTime()).toISOString();
+    const device = (entry.devices[mac] ??= { site: site.name, last: at });
+    if (at > device.last) Object.assign(device, { site: site.name, last: at });
+    const client = online.get(mac);
+    if (client) {
+      device.name = String(client.userName ?? client.deviceName ?? "").slice(0, 24) || device.name;
+      device.mb = Math.round(Number(client.flowUpDown ?? 0) / 1048576);
+    }
+  }
+  pruneStaff(state, now);
+}
+
+function pruneStaff(state, now) {
+  const cutoff = new Date(now.getTime() - RULES.staffWindowDays * 86_400_000).toISOString();
+  for (const [code, entry] of Object.entries(state.staff ?? {})) {
+    for (const [mac, device] of Object.entries(entry.devices)) if (device.last < cutoff) delete entry.devices[mac];
+    if (!Object.keys(entry.devices).length) delete state.staff[code];
+  }
+}
+
+// Staff codes that look abused: more devices than allowed in the last 7 days.
+// Codes used away from their own site are listed too (report only).
+export function staffFlags(staff = {}) {
+  const overLimit = [];
+  const awayFromHome = [];
+  for (const [code, entry] of Object.entries(staff)) {
+    const devices = Object.values(entry.devices);
+    if (devices.length > entry.limit) overLimit.push({ code, pkg: entry.pkg, devices: devices.length, limit: entry.limit, sites: [...new Set(devices.map((device) => device.site))] });
+    if (entry.homeSite) {
+      const away = [...new Set(devices.map((device) => device.site).filter((name) => name !== entry.homeSite))];
+      if (away.length) awayFromHome.push({ code, pkg: entry.pkg, homeSite: entry.homeSite, sites: away });
+    }
+  }
+  return { overLimit, awayFromHome };
+}
+
+// One SMS when a staff code goes over its device limit (again if it grows).
+async function alertStaff(env, state, report, fetchImpl) {
+  const alerted = (state.staffAlerted ??= {});
+  const { overLimit } = staffFlags(state.staff);
+  for (const flag of overLimit) {
+    if ((alerted[flag.code] ?? 0) >= flag.devices) continue;
+    const message = [
+      `QikNet staff code alert: ${flag.code} (${flag.pkg})`,
+      `Used on ${flag.devices} devices in 7 days (limit ${flag.limit}).`,
+      `Sites: ${flag.sites.join(", ")}`,
+    ].join("\n");
+    if (await sendBlockerSms(env, "QikNet Staff Code Alert", message, fetchImpl)) alerted[flag.code] = flag.devices;
+    report.staffAlerts = [...(report.staffAlerts ?? []), flag.code];
+  }
+  for (const code of Object.keys(alerted)) if (!state.staff?.[code]) delete alerted[code];
 }
 
 export function activeCodes(list, now) {
