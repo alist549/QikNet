@@ -146,3 +146,16 @@ test("health alert: one SMS after 3 failed runs, one when it recovers", async ()
   assert.equal(sent.length, 2);
   assert.equal(state.health.failures, 0);
 });
+
+test("repeat offenders are blocked at the lower data limit", () => {
+  const clients = [
+    client("0000.0000.0001", { flowUpDown: 3 * 1048576 }),
+    client("0000.0000.0002", { flowUpDown: 3 * 1048576 }),
+  ];
+  const { targets } = decideTargets(clients, {
+    site, portalSsids, paidMacs: new Set(), allowList: new Set(), now,
+    offences: { "000000000001": { count: 1, last: now.toISOString() } },
+  });
+  assert.deepEqual(targets.map((t) => t.mac), ["000000000001"]);
+  assert.match(targets[0].reason, /blocked before/);
+});
