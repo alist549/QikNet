@@ -97,6 +97,7 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
   };
   const state = (await env.STATE.get(BLOCKER_STATE_KEY, "json")) ?? emptyState();
   const allowList = new Set(splitList(env.BLOCKER_ALLOW_MACS).map(normaliseMac));
+  const staffLimits = parseStaffLimits(env.BLOCKER_STAFF_LIMITS);
 
   try {
     const ruijie = new RuijieConsole({
@@ -195,7 +196,7 @@ export async function runBlocker(env, { live, fetchImpl = fetch, now = () => new
         continue;
       }
       try {
-        const summary = await checkSite(ruijie, site, { state, allowList, vouchers, sites, now: startedAt });
+        const summary = await checkSite(ruijie, site, { state, allowList, vouchers, sites, staffLimits, now: startedAt });
         report.sites.push(summary.site);
         await kickExpired(ruijie, summary.kicks, { live, report, budget });
         const targets = summary.targets;
@@ -380,7 +381,7 @@ export async function listSites(ruijie) {
   }));
 }
 
-async function checkSite(ruijie, site, { state, allowList, vouchers = new Map(), sites = [], now }) {
+async function checkSite(ruijie, site, { state, allowList, vouchers = new Map(), sites = [], staffLimits = {}, now }) {
   const summary = { name: site.name, online: 0, paid: 0, unpaid: 0, toBlock: 0 };
   if (!site.online) return { site: { ...summary, skipped: "AP offline" }, targets: [] };
 
@@ -415,7 +416,7 @@ async function checkSite(ruijie, site, { state, allowList, vouchers = new Map(),
   const paidMacs = new Set(
     records.filter((record) => isPaidRecord(record, vouchers, now)).map((record) => normaliseMac(record.userMac)),
   );
-  watchStaff(state, site, records, vouchers, clients, now);
+  watchStaff(state, site, records, vouchers, clients, now, staffLimits);
 
   // Devices online now whose recent voucher(s) are no longer active: look up
   // when the newest one expired, and keep them as customers inside the grace period.
@@ -659,12 +660,23 @@ export function staffCode(record, vouchers) {
   return { code, pkg: voucher.pkg, homeSite: voucher.site, limit: voucher.maxClients || RULES.staffDefaultMaxDevices };
 }
 
-export function watchStaff(state, site, records, vouchers, clients, now) {
+// "Qiknetstaff=3, 5752g2=4" -> { qiknetstaff: 3, "5752g2": 4 } (codes ignore case).
+export function parseStaffLimits(text) {
+  const limits = {};
+  for (const item of splitList(text)) {
+    const [code, value] = item.split("=").map((part) => part.trim());
+    if (code && Number(value) > 0) limits[code.toLowerCase()] = Number(value);
+  }
+  return limits;
+}
+
+export function watchStaff(state, site, records, vouchers, clients, now, staffLimits = {}) {
   const staff = (state.staff ??= {});
   const online = new Map(clients.map((client) => [normaliseMac(client.mac), client]));
   for (const record of records) {
     const info = staffCode(record, vouchers);
     if (!info) continue;
+    info.limit = staffLimits[info.code.toLowerCase()] ?? info.limit;
     const entry = (staff[info.code] ??= { pkg: info.pkg, homeSite: info.homeSite, limit: info.limit, devices: {} });
     Object.assign(entry, { pkg: info.pkg, homeSite: info.homeSite, limit: info.limit });
     const mac = normaliseMac(record.userMac);

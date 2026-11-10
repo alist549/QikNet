@@ -182,3 +182,13 @@ test("staff watch flags a code used on more devices than allowed", async () => {
   assert.deepEqual(flags.awayFromHome.map((flag) => [flag.code, flag.sites]), [["staff1", ["Unit C"]]]);
   assert.ok(staffReportLines(state.staff).some((line) => line.startsWith("OVER LIMIT staff1")));
 });
+
+test("staff limits from settings override the default", async () => {
+  const { parseStaffLimits, watchStaff, staffFlags } = await import("../src/blocker.mjs");
+  assert.deepEqual(parseStaffLimits("Qiknetstaff=3, bad, x=0"), { qiknetstaff: 3 });
+  const at = String(now.getTime());
+  const records = ["0001", "0002", "0003"].map((end) => ({ account: "Qiknetstaff", authType: "1", userMac: `aaaa.aaaa.${end}`, loginTimes: at }));
+  const state = {};
+  watchStaff(state, { name: "Unit C" }, records, new Map(), [], now, parseStaffLimits("Qiknetstaff=3"));
+  assert.equal(staffFlags(state.staff).overLimit.length, 0);
+});

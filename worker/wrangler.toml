@@ -17,6 +17,8 @@ id = "8996ce5b02a94c9ba05d10d3d860f718"
 
 # Both start in safe mode. Flip to "true" after a successful test run.
 [vars]
+# Device limits for staff codes that differ from the default (code=limit, comma-separated).
+BLOCKER_STAFF_LIMITS = "Qiknetstaff=3"
 MONITOR_SEND_SMS = "true"
 SYNC_LIVE = "true"
 # Station alerts: a station must fail this many checks in a row before
