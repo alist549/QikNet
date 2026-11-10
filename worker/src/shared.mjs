@@ -4,10 +4,14 @@
 export const FREE_PLAN_SUBREQUESTS = 50;
 
 // Must match the [triggers] crons in wrangler.toml.
-export const MONITOR_CRON = "*/15 * * * *";
+// Every 30 minutes, off the blocker's 5-minute marks, to spare the Ruijie API quota.
+export const MONITOR_CRON = "7,37 * * * *";
 // 05:30 and 17:30 Africa/Harare, with follow-ups at :38, :46 and :54 that finish any
 // voucher groups deferred to stay within the free-plan request limit.
 export const SYNC_CRON = "30,38,46,54 3,15 * * *";
+// Non-payer blocker every 5 minutes. The 22:00 UTC run (00:00 Africa/Harare)
+// first releases the day's blocks and sends the day-end report.
+export const BLOCKER_CRON = "*/5 * * * *";
 
 export function createBudget(limit = FREE_PLAN_SUBREQUESTS, fetchImpl = fetch) {
   let used = 0;

@@ -2,11 +2,12 @@ name = "qiknet-automation"
 main = "src/index.mjs"
 compatibility_date = "2026-10-01"
 
-# Station monitor every 15 minutes, and the voucher sync at 05:30 and 17:30
+# Station monitor every 30 minutes (:07, :37), and the voucher sync at 05:30 and 17:30
 # Africa/Harare (03:30 and 15:30 UTC) with follow-ups at :38, :46 and :54.
-# Keep these strings identical to MONITOR_CRON and SYNC_CRON in src/shared.mjs.
+# Non-payer blocker every 5 minutes (BLOCKER_CRON).
+# Keep these strings identical to MONITOR_CRON, SYNC_CRON and BLOCKER_CRON in src/shared.mjs.
 [triggers]
-crons = ["*/15 * * * *", "30,38,46,54 3,15 * * *"]
+crons = ["7,37 * * * *", "30,38,46,54 3,15 * * *", "*/5 * * * *"]
 
 # Alert state and the latest run reports. Replace the id with the one printed by
 #   npx wrangler kv namespace create STATE
@@ -16,8 +17,22 @@ id = "8996ce5b02a94c9ba05d10d3d860f718"
 
 # Both start in safe mode. Flip to "true" after a successful test run.
 [vars]
+# Device limits for staff codes that differ from the default (code=limit, comma-separated).
+BLOCKER_STAFF_LIMITS = "Qiknetstaff=3"
 MONITOR_SEND_SMS = "true"
 SYNC_LIVE = "true"
+# Station alerts: a station must fail this many checks in a row before
+# a DOWN SMS (and pass this many before the BACK UP SMS). One of each per outage.
+# Checks run every 30 minutes (MONITOR_CRON), so 2 checks = 30 to 60 minutes.
+MONITOR_CONFIRM_CHECKS = "2"
+# Harare hours with no DOWN/BACK UP SMS ("" = none). Night events go in the summary.
+MONITOR_QUIET_HOURS = "22-7"
+# Harare hour of the daily SMS listing stations still down ("" = no summary).
+MONITOR_SUMMARY_HOUR = "7"
+# Non-payer blocker: "true" adds MACs to the Wi-Fi blocklist; "false" only reports.
+BLOCKER_LIVE = "true"
+# One day-end report SMS at 00:00 Harare (no per-block SMS).
+BLOCKER_REPORT_SMS = "true"
 RUIJIE_API_BASE_URL = "https://cloud-eu.ruijienetworks.com"
 QIKNET_API_BASE_URL = "https://qiknet-backend-164518585796.us-central1.run.app/api"
 
